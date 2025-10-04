@@ -1,0 +1,229 @@
+name: Build batt_design_override (Auto GKI Fetch)
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_lines:
+        description: '内核主线列表: 4.19,5.4,5.10,5.15,6.1 (空=全部)'
+        required: false
+        default: ''
+      version:
+        description: '模块版本号 (空=module.prop)'
+        required: false
+        default: ''
+      release:
+        description: '发布 Release (true/false)'
+        required: false
+        default: 'false'
+      refresh_sources:
+        description: '强制刷新 GKI 源码缓存 (true/false)'
+        required: false
+        default: 'false'
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        kernel_line: ["4.19", "5.4", "5.10", "5.15", "6.1"]
+    env:
+      MODULE_ID: batt-design-override
+      MAGISK_DIR: packaging/magisk-batt-design-override
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      ARCH: arm64
+      LLVM: 1
+      LLVM_IAS: 1
+      JOBS: 8
+      LTO_JOBS: 8
+    steps:
+      - uses: actions/checkout@v4
+      - name: 过滤所需内核
+        id: filter
+        run: |
+          REQ='${{ github.event.inputs.kernel_lines }}'
+          if [[ -z "$REQ" ]]; then echo BUILD_THIS=1 >> $GITHUB_ENV; else
+            WANT=$(echo "$REQ" | tr ' ' ',' | sed 's/,,*/,/g' | sed 's/^,//;s/,$//')
+            IFS=',' read -r -a ARR <<< "$WANT"; B=0; for k in "${ARR[@]}"; do [[ "$k" == "${{ matrix.kernel_line }}" ]] && B=1; done
+            echo BUILD_THIS=$B >> $GITHUB_ENV; fi
+          echo "REFRESH_SOURCES=${{ github.event.inputs.refresh_sources }}" >> $GITHUB_ENV
+      - name: 跳过标记
+        if: env.BUILD_THIS == '0'
+        run: echo "Skip ${{ matrix.kernel_line }}"
+      - name: 安装依赖
+        if: env.BUILD_THIS == '1'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cpio libelf-dev bc flex bison python3 rsync build-essential zip unzip file jq git
+          echo "[i] Host clang:"; clang --version || true
+      - name: 设定内核路径变量
+        if: env.BUILD_THIS == '1'
+        run: |
+          BASE=$GITHUB_WORKSPACE/gki
+          mkdir -p "$BASE"
+          case "${{ matrix.kernel_line }}" in
+            4.19) BRANCH=android10-4.19; OUT=gki/out-4.19 ;;
+            5.4)  BRANCH=android11-5.4;  OUT=gki/out-5.4 ;;
+            5.10) BRANCH=android12-5.10; OUT=gki/out-5.10 ;;
+            5.15) BRANCH=android13-5.15; OUT=gki/out-5.15 ;;
+            6.1)  BRANCH=android15-6.1; OUT=gki/out-6.1 ;;
+            *) echo '未知 kernel_line' >&2; exit 2;;
+          esac
+          echo GKI_BRANCH=$BRANCH >> $GITHUB_ENV
+          echo KERNEL_SRC=gki/$BRANCH >> $GITHUB_ENV
+          echo KERNEL_OUT=$OUT >> $GITHUB_ENV
+          mkdir -p "$OUT"
+      - name: 获取 GKI 源码缓存 key
+        if: env.BUILD_THIS == '1'
+        id: gki-meta
+        run: |
+          DATE_TAG=$(date +%Y%m%d)
+          echo "date_tag=$DATE_TAG" >> $GITHUB_OUTPUT
+          echo "DATE_TAG=$DATE_TAG" >> $GITHUB_ENV
+      - name: 恢复 GKI 源码缓存
+        if: env.BUILD_THIS == '1'
+        uses: actions/cache@v4
+        with:
+          path: gki/${{ env.GKI_BRANCH }}
+          key: gki-src-${{ env.GKI_BRANCH }}-${{ steps.gki-meta.outputs.date_tag }}
+          restore-keys: |
+            gki-src-${{ env.GKI_BRANCH }}-
+      - name: 拉取 GKI 源码 (如缺失或强制刷新)
+        if: env.BUILD_THIS == '1'
+        run: |
+          if [[ "${{ github.event.inputs.refresh_sources }}" == "true" ]]; then
+            echo "[i] 强制刷新源码"; rm -rf gki/${GKI_BRANCH}
+          fi
+          if [[ ! -d gki/${GKI_BRANCH} ]]; then
+            echo "[i] clone GKI branch $GKI_BRANCH";
+            git clone --depth=1 https://android.googlesource.com/kernel/common gki/tmp-common
+            (cd gki/tmp-common && git fetch origin refs/heads/$GKI_BRANCH:refs/heads/$GKI_BRANCH || true)
+            if [[ -d gki/tmp-common ]]; then
+              if (cd gki/tmp-common && git checkout $GKI_BRANCH); then
+                mv gki/tmp-common gki/${GKI_BRANCH}
+              else
+                echo "[!] 分支 $GKI_BRANCH 不存在：请自行提供匹配源码" >&2; exit 2
+              fi
+            fi
+          else
+            echo "[i] 使用缓存的 GKI 源码 ${GKI_BRANCH}"
+          fi
+      - name: 计算模块源码哈希
+        if: env.BUILD_THIS == '1'
+        id: modhash
+        run: |
+          H=$( (sha256sum extra_modules/batt_design_override/*.c 2>/dev/null; sha256sum extra_modules/batt_design_override/Makefile) | sha256sum | cut -d' ' -f1 )
+          echo "MOD_HASH=$H" >> $GITHUB_ENV
+          echo "hash=$H" >> $GITHUB_OUTPUT
+          echo "::notice title=ModuleHash::$H"
+      - name: 恢复 out 缓存
+        if: env.BUILD_THIS == '1'
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.KERNEL_OUT }}
+          key: gki-out-${{ env.GKI_BRANCH }}-${{ steps.gki-meta.outputs.date_tag }}-${{ steps.modhash.outputs.hash }}
+          restore-keys: |
+            gki-out-${{ env.GKI_BRANCH }}-${{ steps.gki-meta.outputs.date_tag }}-
+            gki-out-${{ env.GKI_BRANCH }}-
+      - name: 设置 ccache
+        if: env.BUILD_THIS == '1'
+        uses: actions/cache@v4
+        with:
+          path: .ccache
+          key: ccache-${{ env.GKI_BRANCH }}-${{ steps.modhash.outputs.hash }}
+          restore-keys: |
+            ccache-${{ env.GKI_BRANCH }}-
+      - name: 预设 PATH (Clang 可能使用系统)
+        if: env.BUILD_THIS == '1'
+        run: |
+          echo "PATH=/usr/lib/ccache:$PATH" >> $GITHUB_ENV
+      - name: 构建模块
+        if: env.BUILD_THIS == '1'
+        run: |
+          set -e
+          ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- CLANG_TRIPLE=aarch64-linux-gnu-
+          if [[ ! -f "$KERNEL_OUT/.config" ]]; then
+            make -C "$KERNEL_SRC" O="$KERNEL_OUT" ARCH=$ARCH LLVM=$LLVM LLVM_IAS=$LLVM_IAS \
+              CLANG_TRIPLE=$CLANG_TRIPLE CROSS_COMPILE=$CROSS_COMPILE \
+              LLVM_AR=llvm-ar LLVM_NM=llvm-nm LLVM_OBJCOPY=llvm-objcopy LLVM_OBJDUMP=llvm-objdump \
+              READELF=llvm-readelf STRIP=llvm-strip gki_defconfig || echo "[!] gki_defconfig 失败可忽略，继续尝试 olddefconfig"
+          fi
+          if [[ -f "$KERNEL_OUT/.config" ]]; then
+            make -C "$KERNEL_SRC" O="$KERNEL_OUT" ARCH=$ARCH LLVM=$LLVM LLVM_IAS=$LLVM_IAS \
+              CLANG_TRIPLE=$CLANG_TRIPLE CROSS_COMPILE=$CROSS_COMPILE \
+              LLVM_AR=llvm-ar LLVM_NM=llvm-nm LLVM_OBJCOPY=llvm-objcopy LLVM_OBJDUMP=llvm-objdump \
+              READELF=llvm-readelf STRIP=llvm-strip olddefconfig || true
+          fi
+          if [[ ! -f "$KERNEL_OUT/Module.symvers" ]]; then
+            echo "[i] make modules (初始化符号)";
+            make -C "$KERNEL_SRC" O="$KERNEL_OUT" ARCH=$ARCH LLVM=$LLVM LLVM_IAS=$LLVM_IAS \
+              CLANG_TRIPLE=$CLANG_TRIPLE CROSS_COMPILE=$CROSS_COMPILE LD=ld.lld \
+              LLVM_AR=llvm-ar LLVM_NM=llvm-nm LLVM_OBJCOPY=llvm-objcopy LLVM_OBJDUMP=llvm-objdump \
+              READELF=llvm-readelf STRIP=llvm-strip -j$(nproc) modules || true
+          fi
+          echo "[i] build external module"
+          make -C "$KERNEL_SRC" O="$KERNEL_OUT" ARCH=$ARCH LLVM=$LLVM LLVM_IAS=$LLVM_IAS \
+            CLANG_TRIPLE=$CLANG_TRIPLE CROSS_COMPILE=$CROSS_COMPILE LD=ld.lld \
+            LLVM_AR=llvm-ar LLVM_NM=llvm-nm LLVM_OBJCOPY=llvm-objcopy LLVM_OBJDUMP=llvm-objdump \
+            READELF=llvm-readelf STRIP=llvm-strip \
+            M=extra_modules/batt_design_override -j$(nproc) modules
+          test -f extra_modules/batt_design_override/batt_design_override.ko
+      - name: 解析版本号
+        if: env.BUILD_THIS == '1'
+        id: ver
+        run: |
+          BASE_VER=$(grep -E '^version=' packaging/magisk-batt-design-override/module.prop | cut -d= -f2-)
+          if [[ -n "${{ github.event.inputs.version }}" ]]; then
+            VER='${{ github.event.inputs.version }}'
+          else
+            VER="$BASE_VER"
+          fi
+          echo VERSION=$VER >> $GITHUB_ENV
+          echo "version=$VER" >> $GITHUB_OUTPUT
+      - name: 打包 Magisk 模块
+        if: env.BUILD_THIS == '1'
+        run: |
+          mkdir -p dist
+          ./packaging/build_magisk_zip.sh \
+            --ko extra_modules/batt_design_override/batt_design_override.ko \
+            --kernel-line ${{ matrix.kernel_line }} \
+            --version $VERSION \
+            --output dist
+          ls -l dist
+      - name: 上传构件
+        if: env.BUILD_THIS == '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: batt-design-override-${{ matrix.kernel_line }}
+          path: |
+            extra_modules/batt_design_override/batt_design_override.ko
+            dist/*.zip
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: >-
+      (github.event_name == 'workflow_dispatch' && inputs.release == 'true')
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: collected
+      - name: Generate notes
+        run: |
+          echo "Release battmod-$(date +%Y%m%d-%H%M%S)" > NOTES.md
+          find collected -name '*.zip' -printf '* %f\n' >> NOTES.md || true
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: battmod-${{ github.run_number }}
+          name: battmod-${{ github.run_number }}
+          body_path: NOTES.md
+          files: |
+            collected/**/*.zip
+            collected/**/batt_design_override.ko
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

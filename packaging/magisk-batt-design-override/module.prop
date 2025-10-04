@@ -1,0 +1,7 @@
+id=batt-design-override
+name=Battery Design Override (Kernel kprobe)
+version=1.0.2
+versionCode=102
+author=serein-213
+minMagisk=20.4
+description=内核级修改手机电池设计容量.
