@@ -142,6 +142,22 @@ A: 确认改动在 `batt_design_override.c` / `Makefile` 内；否则 MOD_HASH �
 Q: 想只构建 5.15？  
 A: kernel_lines 输入 `5.15`。  
 
+### 构建错误记录 & 修复
+2025-10: 在 5.4 / 5.10 分支下出现：
+```
+scripts/Makefile.build:42: .../extra_modules/batt_design_override/Makefile: No such file or directory
+No rule to make target '.../extra_modules/batt_design_override/Makefile'.  Stop.
+```
+原因：`make -C <KERNEL_SRC> M=extra_modules/...` 时 Kbuild 以 `<KERNEL_SRC>` 为基准解析相对路径，**而本仓库模块目录在工作区根目录**，并未复制进入 `gki/<branch>` 源树，导致找不到。
+
+修复：改用绝对路径 `M=$PWD/extra_modules/batt_design_override`，Kbuild 支持外部 out-of-tree 模块目录，不再依赖相对位置。Workflow 已更新相应步骤，并在执行前检测 `Makefile` 是否存在。
+
+如果你想回退到早期相对路径方式，可在 workflow 的“构建模块”步骤把 `MOD_DIR_ABS=$(pwd)/...` 改回 `M=extra_modules/batt_design_override`，同时在 `gki/<branch>` 下创建同名目录软链接：
+```bash
+ln -s ../../../extra_modules gki/<branch>/extra_modules
+```
+（不推荐，绝对路径更直接稳定。）
+
 ### 后续可拓展 TODO（可选）
 - 使用真实 HEAD commit 替代日期做源码 cache key
 - 支持自定义工具链下载（输入 TOOLCHAIN_URL）

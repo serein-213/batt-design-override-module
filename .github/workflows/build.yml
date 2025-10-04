@@ -186,9 +186,16 @@ jobs:
             echo "[i] 初始化 modules (生成符号)";
             make -C "$KERNEL_SRC" O="$KERNEL_OUT" ARCH=$ARCH LLVM=1 LLVM_IAS=1 CC=clang LD=ld.lld -j$(nproc) modules || true
           fi
+          # 使用绝对路径的 M，避免内核构建系统在 $KERNEL_SRC 下解析相对 extra_modules/ 路径失败
+          MOD_DIR_ABS=$(pwd)/extra_modules/batt_design_override
+          if [[ ! -f "$MOD_DIR_ABS/Makefile" ]]; then
+            echo "::error ::模块 Makefile 不存在: $MOD_DIR_ABS/Makefile"; ls -l "$MOD_DIR_ABS" || true; exit 2
+          fi
+          echo "[i] 使用外部模块目录: $MOD_DIR_ABS"
+          # Kbuild 允许直接 M=<absolute path>
           make -C "$KERNEL_SRC" O="$KERNEL_OUT" ARCH=$ARCH LLVM=1 LLVM_IAS=1 CC=clang LD=ld.lld \
-            M=extra_modules/batt_design_override -j$(nproc) modules
-          test -f extra_modules/batt_design_override/batt_design_override.ko
+            M="$MOD_DIR_ABS" -j$(nproc) modules
+          test -f "$MOD_DIR_ABS/batt_design_override.ko"
       - name: 解析版本号
         if: steps.filter.outputs.build == '1'
         id: ver
