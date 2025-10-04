@@ -185,15 +185,22 @@ jobs:
               echo "::group::可用 *gki* defconfig 列表"; ls "$KERNEL_SRC"/arch/arm64/configs/*gki* 2>/dev/null || true; echo "::endgroup::";
               echo "::error ::gki_defconfig 失败 (branch='${{ steps.fetch_kernel.outputs.branch }}')"; exit 2; fi
           fi
+          # 禁用 LTO 以避免在部分版本 (如 5.15) 构建 vmlinux 时 OOM/超时
+          sed -i 's/^CONFIG_LTO_CLANG_THIN=y/# CONFIG_LTO_CLANG_THIN is not set/' $KERNEL_OUT/.config 2>/dev/null || true
+          sed -i 's/^CONFIG_LTO_CLANG_FULL=y/# CONFIG_LTO_CLANG_FULL is not set/' $KERNEL_OUT/.config 2>/dev/null || true
+          if ! grep -q '^CONFIG_LTO_NONE=y' $KERNEL_OUT/.config 2>/dev/null; then echo 'CONFIG_LTO_NONE=y' >> $KERNEL_OUT/.config; fi
+          # 关闭 ThinLTO 相关开关
+          sed -i 's/^CONFIG_THINLTO=y/# CONFIG_THINLTO is not set/' $KERNEL_OUT/.config 2>/dev/null || true
+          yes "" | make -C "$KERNEL_SRC" O="$KERNEL_OUT" ARCH=$ARCH LLVM=1 LLVM_IAS=1 CC=clang LD=ld.lld olddefconfig >/dev/null 2>&1 || true
+          echo "[dbg] LTO flags after patch:"; egrep 'LTO|THIN' $KERNEL_OUT/.config || true
           make -C "$KERNEL_SRC" O="$KERNEL_OUT" ARCH=$ARCH LLVM=1 LLVM_IAS=1 CC=clang LD=ld.lld olddefconfig || true
           # 仅准备模块所需头与符号 (更轻量)
           if [[ ! -f "$KERNEL_OUT/Module.symvers" ]]; then
             echo "[i] 运行 modules_prepare 生成符号与头文件";
-            make -C "$KERNEL_SRC" O="$KERNEL_OUT" ARCH=$ARCH LLVM=1 LLVM_IAS=1 CC=clang LD=ld.lld modules_prepare
-            # 有些内核仍需一次空 modules 构建来生成 Module.symvers
+            make -C "$KERNEL_SRC" O="$KERNEL_OUT" ARCH=$ARCH LLVM=1 LLVM_IAS=1 CC=clang LD=ld.lld modules_prepare || true
             if [[ ! -f "$KERNEL_OUT/Module.symvers" ]]; then
-              echo "[i] 追加最小 modules (parallel) 以生成 Module.symvers";
-              make -C "$KERNEL_SRC" O="$KERNEL_OUT" ARCH=$ARCH LLVM=1 LLVM_IAS=1 CC=clang LD=ld.lld -j$(nproc) modules || true
+              echo "[i] 追加最小 modules (低并发) 以生成 Module.symvers";
+              make -C "$KERNEL_SRC" O="$KERNEL_OUT" ARCH=$ARCH LLVM=1 LLVM_IAS=1 CC=clang LD=ld.lld -j$(( $(nproc)/2 )) modules || true
             fi
           fi
           # 使用绝对路径的 M，避免内核构建系统在 $KERNEL_SRC 下解析相对 extra_modules/ 路径失败

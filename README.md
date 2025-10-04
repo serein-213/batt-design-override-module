@@ -176,6 +176,17 @@ chmod +x packaging/build_magisk_zip.sh
 bash packaging/build_magisk_zip.sh --ko extra_modules/batt_design_override/batt_design_override.ko --kernel-line 5.10 --output dist
 ```
 
+2025-10 (再次) 5.15 分支构建在 `LTO vmlinux.o` 阶段被 Terminated：
+原因：全量链接 (ThinLTO/Full LTO) 内存峰值高，GitHub 共享 runner 上可能 OOM 被系统杀死。
+处理：Workflow 在生成 `.config` 后强制：
+```
+# CONFIG_LTO_CLANG_THIN is not set
+# CONFIG_LTO_CLANG_FULL is not set
+CONFIG_LTO_NONE=y
+# CONFIG_THINLTO is not set
+```
+并降级初次 `modules` 并发 (-j nproc/2)。这样只准备模块符号与头文件而不必成功完成 vmlinux LTO 全量链接。
+
 ### 后续可拓展 TODO（可选）
 - 使用真实 HEAD commit 替代日期做源码 cache key
 - 支持自定义工具链下载（输入 TOOLCHAIN_URL）
