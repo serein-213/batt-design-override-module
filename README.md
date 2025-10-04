@@ -158,6 +158,17 @@ ln -s ../../../extra_modules gki/<branch>/extra_modules
 ```
 （不推荐，绝对路径更直接稳定。）
 
+2025-10 (后续)：出现大量 `error: unknown register name 'x0' in asm` (来自 `arch/arm64/include/asm/atomic_lse.h`)。
+原因：在某些 runner 场景下，最终 `make M=... modules` 阶段未显式传递 `CROSS_COMPILE/CLANG_TRIPLE`，触发 Kbuild 选择宿主默认 triple（可能导致用错误的汇编器模式解析 inline asm），进而 clang 报寄存器名无效。
+
+新修复：
+1. 在模块编译命令显式携带 `CLANG_TRIPLE` 与 `CROSS_COMPILE`。
+2. 增加调试输出打印关键环境变量。
+3. 使用 `modules_prepare` 代替完整 `modules`，减少不必要的全量内核模块编译时间。
+4. 去除之前的内核源码目录软链接回退（避免顶层递归构建再次触发路径歧义）。
+
+如仍出现寄存器报错，可检查 clang 版本或改为使用 AOSP 预编译 clang（后续可扩展）。
+
 ### 后续可拓展 TODO（可选）
 - 使用真实 HEAD commit 替代日期做源码 cache key
 - 支持自定义工具链下载（输入 TOOLCHAIN_URL）

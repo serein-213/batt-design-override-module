@@ -170,8 +170,12 @@ jobs:
           set -e
           KERNEL_SRC='${{ steps.fetch_kernel.outputs.src }}'
           KERNEL_OUT='${{ steps.fetch_kernel.outputs.out }}'
-          ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CLANG_TRIPLE=aarch64-linux-gnu-
-          export LLVM=1 LLVM_IAS=1
+          ARCH=arm64
+          CROSS_COMPILE=aarch64-linux-gnu-
+          CLANG_TRIPLE=aarch64-linux-gnu-
+          export LLVM=1 LLVM_IAS=1 ARCH CROSS_COMPILE CLANG_TRIPLE
+          echo "[dbg] ENV ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE CLANG_TRIPLE=$CLANG_TRIPLE LLVM=$LLVM LLVM_IAS=$LLVM_IAS"
+          clang --version | head -n1 || true
           if ! command -v ld.lld >/dev/null 2>&1; then echo "::error ::缺少 ld.lld"; exit 2; fi
           if [[ ! -f "$KERNEL_OUT/.config" ]]; then
             if ! make -C "$KERNEL_SRC" O="$KERNEL_OUT" ARCH=$ARCH LLVM=1 LLVM_IAS=1 \
@@ -182,9 +186,15 @@ jobs:
               echo "::error ::gki_defconfig 失败 (branch='${{ steps.fetch_kernel.outputs.branch }}')"; exit 2; fi
           fi
           make -C "$KERNEL_SRC" O="$KERNEL_OUT" ARCH=$ARCH LLVM=1 LLVM_IAS=1 CC=clang LD=ld.lld olddefconfig || true
+          # 仅准备模块所需头与符号 (更轻量)
           if [[ ! -f "$KERNEL_OUT/Module.symvers" ]]; then
-            echo "[i] 初始化 modules (生成符号)";
-            make -C "$KERNEL_SRC" O="$KERNEL_OUT" ARCH=$ARCH LLVM=1 LLVM_IAS=1 CC=clang LD=ld.lld -j$(nproc) modules || true
+            echo "[i] 运行 modules_prepare 生成符号与头文件";
+            make -C "$KERNEL_SRC" O="$KERNEL_OUT" ARCH=$ARCH LLVM=1 LLVM_IAS=1 CC=clang LD=ld.lld modules_prepare
+            # 有些内核仍需一次空 modules 构建来生成 Module.symvers
+            if [[ ! -f "$KERNEL_OUT/Module.symvers" ]]; then
+              echo "[i] 追加最小 modules (parallel) 以生成 Module.symvers";
+              make -C "$KERNEL_SRC" O="$KERNEL_OUT" ARCH=$ARCH LLVM=1 LLVM_IAS=1 CC=clang LD=ld.lld -j$(nproc) modules || true
+            fi
           fi
           # 使用绝对路径的 M，避免内核构建系统在 $KERNEL_SRC 下解析相对 extra_modules/ 路径失败
           MOD_DIR_ABS=$(pwd)/extra_modules/batt_design_override
@@ -193,7 +203,8 @@ jobs:
           fi
           echo "[i] 使用外部模块目录: $MOD_DIR_ABS"
           # Kbuild 允许直接 M=<absolute path>
-          make -C "$KERNEL_SRC" O="$KERNEL_OUT" ARCH=$ARCH LLVM=1 LLVM_IAS=1 CC=clang LD=ld.lld \
+          make -C "$KERNEL_SRC" O="$KERNEL_OUT" ARCH=$ARCH LLVM=1 LLVM_IAS=1 \
+            CC=clang LD=ld.lld CLANG_TRIPLE=$CLANG_TRIPLE CROSS_COMPILE=$CROSS_COMPILE \
             M="$MOD_DIR_ABS" -j$(nproc) modules
           test -f "$MOD_DIR_ABS/batt_design_override.ko"
       - name: 解析版本号
