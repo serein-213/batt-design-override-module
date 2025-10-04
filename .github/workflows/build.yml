@@ -223,7 +223,11 @@ jobs:
         if: steps.filter.outputs.build == '1'
         run: |
           mkdir -p dist
-          ./packaging/build_magisk_zip.sh \
+          echo "[dbg] 打包脚本权限:"; ls -l packaging/build_magisk_zip.sh || true
+          if [[ ! -x packaging/build_magisk_zip.sh ]]; then
+            echo "[i] 修复执行权限 (chmod +x)"; chmod +x packaging/build_magisk_zip.sh || true
+          fi
+          bash packaging/build_magisk_zip.sh \
             --ko extra_modules/batt_design_override/batt_design_override.ko \
             --kernel-line ${{ matrix.kernel_line }} \
             --version $VERSION \

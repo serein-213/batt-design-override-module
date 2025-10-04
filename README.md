@@ -169,6 +169,13 @@ ln -s ../../../extra_modules gki/<branch>/extra_modules
 
 如仍出现寄存器报错，可检查 clang 版本或改为使用 AOSP 预编译 clang（后续可扩展）。
 
+附加：打包阶段 `build_magisk_zip.sh: Permission denied (exit 126)`：
+原因：脚本执行位在某些 clone/patch 情况下被剥离；Workflow 已改为在执行前 `ls -l` + 条件 `chmod +x` 并用 `bash` 调用，避免失败。如果本地执行遇到：
+```bash
+chmod +x packaging/build_magisk_zip.sh
+bash packaging/build_magisk_zip.sh --ko extra_modules/batt_design_override/batt_design_override.ko --kernel-line 5.10 --output dist
+```
+
 ### 后续可拓展 TODO（可选）
 - 使用真实 HEAD commit 替代日期做源码 cache key
 - 支持自定义工具链下载（输入 TOOLCHAIN_URL）
