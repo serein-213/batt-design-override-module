@@ -92,10 +92,6 @@ jobs:
         run: |
           set -e
           CANDIDATES='${{ steps.branch_select.outputs.candidates }}'
-            echo "[i] 使用自定义仓库: $CUSTOM_URL @ $CUSTOM_REF"
-            git clone --depth=1 --branch "$CUSTOM_REF" "$CUSTOM_URL" gki/custom-src
-            SELECTED="$CUSTOM_REF"; SRC_PATH="gki/custom-src"
-          else
           CUSTOM_URL='${{ github.event.inputs.custom_repo_url }}'
           CUSTOM_REF='${{ github.event.inputs.custom_ref }}'
           if [[ -n "$CUSTOM_URL" && -n "$CUSTOM_REF" ]]; then
@@ -114,7 +110,6 @@ jobs:
               mv gki/tmp-clone gki/$cand
               SELECTED="$cand"; SRC_PATH="gki/$cand"; break
             done
-          fi
           fi
           if [[ -z "$SELECTED" ]]; then
             echo "::error ::未能匹配任何有效分支 ($CANDIDATES)，可提供 custom_repo_url+custom_ref"; exit 2
