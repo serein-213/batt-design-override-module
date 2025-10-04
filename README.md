@@ -2,7 +2,7 @@ git add .
 ## batt-design-override 最小可构建仓库
 
 该目录可直接初始化为独立 GitHub 仓库，一键使用内置 GitHub Actions 自动：
-1. 拉取指定 GKI 分支源码 (android10-4.19 / android11-5.4 / android12-5.10 / android13-5.15 / android15-6.1)
+1. 拉取指定 GKI 分支源码 (android11-5.4 / android12-5.10 / android13-5.15 / android14-6.1)；若首选分支拉取失败按候选顺序回退，最终回退 android-mainline。
 2. 初始化配置 + 生成 Module.symvers
 3. 构建外部内核模块 `batt_design_override.ko`
 4. 打包生成 Magisk 模块 ZIP（含版本号与内核线后缀）
@@ -14,13 +14,25 @@ export-batt-module/
   README.md
   .github/workflows/build.yml              # 自动拉取+缓存+构建+打包+发布
   extra_modules/batt_design_override/
-    Makefile
     batt_design_override.c                 # 模块源码（kretprobe 覆盖电池属性）
   packaging/
     build_magisk_zip.sh                    # 通用打包脚本
-    magisk-batt-design-override/
-      module.prop
+### GKI 分支映射 (动态候选)
+| kernel_line | 候选分支顺序（依次尝试） | 示例 OUT 目录 |
+|-------------|--------------------------|--------------|
+| 5.4  | android11-5.4 → android12-5.10 → android-mainline | gki/out-5.4  |
+| 5.10 | android12-5.10 → android13-5.10 → android-mainline | gki/out-5.10 |
+| 5.15 | android13-5.15 → android14-6.1 → android-mainline | gki/out-5.15 |
+| 6.1  | android14-6.1 → android-mainline | gki/out-6.1  |
       common/params.conf                   # 可自定义默认参数（如后续加入加载脚本）
+```
+### 使用提示（设备端）
+已包含自动加载 `service.sh`：正常情况下无需手动 insmod；若需手动覆盖参数可：
+```bash
+su
+cd /data/adb/modules/batt-design-override/common
+rmmod batt_design_override 2>/dev/null || true
+insmod batt_design_override.ko design_uah=5300000 verbose=1
 ```
 
 ### 快速初始化步骤
@@ -44,14 +56,7 @@ git push -u origin main
 | release | 构建完成后发布 Release | `true` / `false` | `false` |
 | refresh_sources | 忽略缓存强制重新 clone GKI 源码 | `true` / `false` | `false` |
 
-### GKI 分支映射
-| kernel_line | GKI 分支 | 示例 OUT 目录 |
-|-------------|----------|--------------|
-| 4.19 | android10-4.19 | gki/out-4.19 |
-| 5.4  | android11-5.4  | gki/out-5.4  |
-| 5.10 | android12-5.10 | gki/out-5.10 |
-| 5.15 | android13-5.15 | gki/out-5.15 |
-| 6.1  | android15-6.1  | gki/out-6.1  |
+> 说明：不再支持 4.19；如果需要 4.19 可使用自定义仓库 (custom_repo_url + custom_ref) 指向厂商/旧 AOSP 分支。
 
 ### 缓存策略
 | 缓存对象 | Key 组成 | 刷新条件 |
@@ -119,11 +124,13 @@ su -c 'insmod /data/adb/modules/batt-design-override/common/batt_design_override
 方便后续脚本（如果你添加）可根据系统内核线自动选择最匹配的 ko。
 
 ### 使用提示（设备端）
-当前仓库未包含自动加载脚本；Magisk 安装后需手动：
+已包含自动加载脚本 `service.sh`，正常情况下无需手动 insmod；如需自定义参数即时生效：
 ```bash
-su -c 'insmod /data/adb/modules/batt-design-override/common/batt_design_override.ko design_uah=5300000 verbose=1'
+su
+cd /data/adb/modules/batt-design-override/common
+rmmod batt_design_override 2>/dev/null || true
+insmod batt_design_override.ko design_uah=5300000 verbose=1
 ```
-可在 `module.prop` 或新增 `service.sh` 实现自动加载（如果需要我可再补）。
 
 ### 常见问题 (FAQ)
 Q: 为什么没有锁定特定 commit？  
