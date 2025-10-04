@@ -185,24 +185,33 @@ jobs:
               echo "::group::可用 *gki* defconfig 列表"; ls "$KERNEL_SRC"/arch/arm64/configs/*gki* 2>/dev/null || true; echo "::endgroup::";
               echo "::error ::gki_defconfig 失败 (branch='${{ steps.fetch_kernel.outputs.branch }}')"; exit 2; fi
           fi
-          # 禁用 LTO 以避免在部分版本 (如 5.15) 构建 vmlinux 时 OOM/超时
-          sed -i 's/^CONFIG_LTO_CLANG_THIN=y/# CONFIG_LTO_CLANG_THIN is not set/' $KERNEL_OUT/.config 2>/dev/null || true
-          sed -i 's/^CONFIG_LTO_CLANG_FULL=y/# CONFIG_LTO_CLANG_FULL is not set/' $KERNEL_OUT/.config 2>/dev/null || true
-          if ! grep -q '^CONFIG_LTO_NONE=y' $KERNEL_OUT/.config 2>/dev/null; then echo 'CONFIG_LTO_NONE=y' >> $KERNEL_OUT/.config; fi
-          # 关闭 ThinLTO 相关开关
-          sed -i 's/^CONFIG_THINLTO=y/# CONFIG_THINLTO is not set/' $KERNEL_OUT/.config 2>/dev/null || true
-          yes "" | make -C "$KERNEL_SRC" O="$KERNEL_OUT" ARCH=$ARCH LLVM=1 LLVM_IAS=1 CC=clang LD=ld.lld olddefconfig >/dev/null 2>&1 || true
-          echo "[dbg] LTO flags after patch:"; egrep 'LTO|THIN' $KERNEL_OUT/.config || true
-          make -C "$KERNEL_SRC" O="$KERNEL_OUT" ARCH=$ARCH LLVM=1 LLVM_IAS=1 CC=clang LD=ld.lld olddefconfig || true
-          # 仅准备模块所需头与符号 (更轻量)
-          if [[ ! -f "$KERNEL_OUT/Module.symvers" ]]; then
-            echo "[i] 运行 modules_prepare 生成符号与头文件";
-            make -C "$KERNEL_SRC" O="$KERNEL_OUT" ARCH=$ARCH LLVM=1 LLVM_IAS=1 CC=clang LD=ld.lld modules_prepare || true
-            if [[ ! -f "$KERNEL_OUT/Module.symvers" ]]; then
-              echo "[i] 追加最小 modules (低并发) 以生成 Module.symvers";
-              make -C "$KERNEL_SRC" O="$KERNEL_OUT" ARCH=$ARCH LLVM=1 LLVM_IAS=1 CC=clang LD=ld.lld -j$(( $(nproc)/2 )) modules || true
-            fi
+          # 使用 scripts/config 精准关闭占内存/耗时特性，只保留最小构建环境
+          if [[ -x "$KERNEL_SRC/scripts/config" ]]; then
+            CFGTOOL="$KERNEL_SRC/scripts/config"
+          else
+            CFGTOOL="$KERNEL_OUT/scripts/config"
           fi
+          if [[ -x "$CFGTOOL" ]]; then
+            $CFGTOOL --file "$KERNEL_OUT/.config" \
+              -d LTO_CLANG_THIN -d LTO_CLANG_FULL -e LTO_NONE -d THINLTO \
+              -d MODVERSIONS -d CFI_CLANG -d KASAN -d KCSAN -d UBSAN || true
+          else
+            echo "[warn] scripts/config 不可执行，回退 sed 方式";
+            sed -i 's/^CONFIG_LTO_CLANG_THIN=y/# CONFIG_LTO_CLANG_THIN is not set/' $KERNEL_OUT/.config 2>/dev/null || true
+            sed -i 's/^CONFIG_LTO_CLANG_FULL=y/# CONFIG_LTO_CLANG_FULL is not set/' $KERNEL_OUT/.config 2>/dev/null || true
+            grep -q '^CONFIG_LTO_NONE=y' $KERNEL_OUT/.config || echo 'CONFIG_LTO_NONE=y' >> $KERNEL_OUT/.config
+            sed -i 's/^CONFIG_THINLTO=y/# CONFIG_THINLTO is not set/' $KERNEL_OUT/.config 2>/dev/null || true
+            sed -i 's/^CONFIG_MODVERSIONS=y/# CONFIG_MODVERSIONS is not set/' $KERNEL_OUT/.config 2>/dev/null || true
+            sed -i 's/^CONFIG_CFI_CLANG=y/# CONFIG_CFI_CLANG is not set/' $KERNEL_OUT/.config 2>/dev/null || true
+            sed -i 's/^CONFIG_KASAN=.*/# CONFIG_KASAN is not set/' $KERNEL_OUT/.config 2>/dev/null || true
+            sed -i 's/^CONFIG_KCSAN=y/# CONFIG_KCSAN is not set/' $KERNEL_OUT/.config 2>/dev/null || true
+            sed -i 's/^CONFIG_UBSAN=y/# CONFIG_UBSAN is not set/' $KERNEL_OUT/.config 2>/dev/null || true
+          fi
+          yes "" | make -C "$KERNEL_SRC" O="$KERNEL_OUT" ARCH=$ARCH LLVM=1 LLVM_IAS=1 CC=clang LD=ld.lld olddefconfig >/dev/null 2>&1 || true
+          make -C "$KERNEL_SRC" O="$KERNEL_OUT" ARCH=$ARCH LLVM=1 LLVM_IAS=1 CC=clang LD=ld.lld olddefconfig || true
+          echo "[dbg] 已禁用的特性 (LTO/MODVERSIONS/CFI/KASAN/KCSAN/UBSAN) 状态:"; egrep 'LTO|MODVERSIONS|CFI|KASAN|KCSAN|UBSAN' $KERNEL_OUT/.config || true
+          echo "[i] 仅执行 prepare/modules_prepare，避免进入整树 modules 导致 OOM"
+          make -C "$KERNEL_SRC" O="$KERNEL_OUT" ARCH=$ARCH LLVM=1 LLVM_IAS=1 prepare modules_prepare || true
           # 使用绝对路径的 M，避免内核构建系统在 $KERNEL_SRC 下解析相对 extra_modules/ 路径失败
           MOD_DIR_ABS=$(pwd)/extra_modules/batt_design_override
           if [[ ! -f "$MOD_DIR_ABS/Makefile" ]]; then
