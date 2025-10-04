@@ -105,11 +105,18 @@ static int show_entry_handler(struct kretprobe_instance *ri, struct pt_regs *reg
 static int show_ret_handler(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
     struct ps_show_args *args = (struct ps_show_args *)ri->data;
-    if (!args || !args->dev || !args->da || !args->buf) return 0;
-    const char *attr = args->da->attr.name; if (!attr) return 0;
-    struct power_supply *psy = dev_get_drvdata(args->dev);
-    const char *name = (psy && psy->desc) ? psy->desc->name : NULL;
+    const char *attr;
+    struct power_supply *psy;
+    const char *name;
     ssize_t newlen;
+
+    if (!args || !args->dev || !args->da || !args->buf)
+        return 0;
+    attr = args->da->attr.name;
+    if (!attr)
+        return 0;
+    psy = dev_get_drvdata(args->dev);
+    name = (psy && psy->desc) ? psy->desc->name : NULL;
     if (!strcmp(attr, "charge_full_design")) {
         if (((override_any && design_uah>0) || (name && !strcmp(name,batt_name) && design_uah>0))) {
             newlen = scnprintf(args->buf, PAGE_SIZE, "%llu\n", design_uah);
