@@ -12,6 +12,7 @@
 #include <linux/timer.h>
 #include <linux/notifier.h>
 #include <linux/workqueue.h>
+#include <linux/version.h>
 #include <linux/kmod.h>
 #include <linux/notifier.h>
 #include <linux/workqueue.h>
@@ -347,10 +348,22 @@ static ssize_t proc_write(struct file *file, const char __user *buf, size_t coun
     return count;
 }
 
+#if defined(HAVE_PROC_OPS) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,6,0))
 static const struct proc_ops proc_fops = {
     .proc_read  = proc_read,
     .proc_write = proc_write,
 };
+#else
+static ssize_t legacy_read(struct file *file, char __user *buf, size_t count, loff_t *ppos)
+{ return proc_read(file, buf, count, ppos); }
+static ssize_t legacy_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos)
+{ return proc_write(file, buf, count, ppos); }
+static const struct file_operations proc_fops = {
+    .owner = THIS_MODULE,
+    .read  = legacy_read,
+    .write = legacy_write,
+};
+#endif
 
 /* 监控和自动重新应用功能 */
 static struct timer_list monitor_timer;
