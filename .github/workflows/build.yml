@@ -276,6 +276,7 @@ jobs:
           path: |
             extra_modules/batt_design_override/batt_design_override.ko
             extra_modules/chg_param_override/chg_param_override.ko
+            packaging/magisk-batt-design-override/common/battcaplsp.apk
             dist/*.zip
           if-no-files-found: error
 
@@ -302,7 +303,9 @@ jobs:
           name: battmod-${{ github.run_number }}
           body_path: NOTES.md
           files: |
-            collected/**/*.zip
+            collected/**/dist/*.zip
             collected/**/batt_design_override.ko
+            collected/**/chg_param_override.ko
+            collected/**/battcaplsp.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

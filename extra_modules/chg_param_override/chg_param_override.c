@@ -348,7 +348,7 @@ static ssize_t proc_write(struct file *file, const char __user *buf, size_t coun
     return count;
 }
 
-#if defined(HAVE_PROC_OPS) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,6,0))
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5,6,0))
 static const struct proc_ops proc_fops = {
     .proc_read  = proc_read,
     .proc_write = proc_write,
