@@ -260,6 +260,19 @@ jobs:
               READELF=llvm-readelf STRIP=llvm-strip olddefconfig
           fi
           
+          # Disable ThinLTO for memory-constrained CI on older kernels
+          if [[ "${{ matrix.kernel_line }}" == "5.4" || "${{ matrix.kernel_line }}" == "5.10" ]]; then
+            echo "[i] Disabling ThinLTO for kernel ${{ matrix.kernel_line }} to prevent OOM"
+            if grep -q '^CONFIG_LTO_CLANG_THIN=y' "$KERNEL_OUT/.config"; then
+              sed -i 's/^CONFIG_LTO_CLANG_THIN=y/# CONFIG_LTO_CLANG_THIN is not set/' "$KERNEL_OUT/.config"
+              echo '# CONFIG_LTO_CLANG_THIN is not set' >> "$KERNEL_OUT/.config"
+              make -C "$KERNEL_SRC" O="$KERNEL_OUT" ARCH=$ARCH LLVM=1 LLVM_IAS=1 \
+                CC=clang LD=ld.lld CLANG_TRIPLE=$CLANG_TRIPLE CROSS_COMPILE=$CROSS_COMPILE \
+                LLVM_AR=llvm-ar LLVM_NM=llvm-nm LLVM_OBJCOPY=llvm-objcopy LLVM_OBJDUMP=llvm-objdump \
+                READELF=llvm-readelf STRIP=llvm-strip olddefconfig
+            fi
+          fi
+          
           # Ensure Module.symvers exists
           if [[ ! -f "$KERNEL_OUT/Module.symvers" ]]; then
             echo "[i] No Module.symvers found, running make modules"
@@ -270,11 +283,17 @@ jobs:
               -j$(nproc) modules
           fi
           
-          # ThinLTO configuration (from local script)
+          # ThinLTO configuration (memory-aware for CI)
           if grep -q '^CONFIG_LTO_CLANG_THIN=y' "$KERNEL_OUT/.config" 2>/dev/null; then
-            LTO_JOBS=$(nproc)
+            # Limit LTO jobs to prevent OOM in CI environment
+            # 5.10 and older kernels need more conservative settings
+            case "${{ matrix.kernel_line }}" in
+              5.4|5.10) LTO_JOBS=1 ;;  # Most conservative for older kernels
+              5.15) LTO_JOBS=2 ;;      # Moderate for 5.15
+              6.1|*) LTO_JOBS=4 ;;     # More aggressive for newer kernels
+            esac
             export KBUILD_LDFLAGS="${KBUILD_LDFLAGS:-} -Wl,-plugin-opt,jobs=${LTO_JOBS}"
-            echo "[i] Detected ThinLTO -> LTO_JOBS=$LTO_JOBS"
+            echo "[i] Detected ThinLTO -> LTO_JOBS=$LTO_JOBS (kernel=${{ matrix.kernel_line }})"
           fi
           
           # Create compiler wrapper (critical fix)
