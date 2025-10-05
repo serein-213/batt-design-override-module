@@ -1,10 +1,10 @@
 name: Build batt_design_override (Auto GKI Fetch)
 
-on:
+"on":
   workflow_dispatch:
     inputs:
       kernel_lines:
-        description: '内核版本选择'
+        description: 'Kernel version selection'
         type: choice
         required: true
         default: '6.1'
@@ -15,7 +15,7 @@ on:
           - '5.4'
           - '5.4,5.10,5.15,6.1'
       build_type:
-        description: '构建类型'
+        description: 'Build type'
         type: choice
         required: true
         default: 'both'
@@ -24,39 +24,39 @@ on:
           - 'batt_only'
           - 'chg_only'
       version:
-        description: '模块版本号 (空=自动生成)'
+        description: 'Module version (empty=auto)'
         required: false
         default: ''
       release:
-        description: '发布 Release'
+        description: 'Create Release'
         type: boolean
         required: false
         default: false
       refresh_sources:
-        description: '强制刷新 GKI 源码缓存'
+        description: 'Force refresh GKI source cache'
         type: boolean
         required: false
         default: false
       enable_debug:
-        description: '启用调试模式 (详细日志)'
+        description: 'Enable debug mode (verbose logs)'
         type: boolean
         required: false
         default: false
       custom_repo_url:
-        description: '自定义内核源码仓库 (可选)'
+        description: 'Custom kernel source repo (optional)'
         required: false
         default: ''
       custom_ref:
-        description: '自定义仓库分支/标签'
+        description: 'Custom repo branch/tag'
         required: false
         default: ''
       upload_artifacts:
-        description: '上传构建产物'
+        description: 'Upload build artifacts'
         type: boolean
         required: false
         default: true
       skip_cache:
-        description: '跳过缓存 (强制重新构建)'
+        description: 'Skip cache (force rebuild)'
         type: boolean
         required: false
         default: false
@@ -81,7 +81,7 @@ jobs:
       LTO_JOBS: 8
     steps:
       - uses: actions/checkout@v4
-      - name: 过滤所需内核
+      - name: Filter required kernels
         id: filter
         run: |
           REQ='${{ inputs.kernel_lines }}'
@@ -96,24 +96,23 @@ jobs:
             done
           fi
           echo "build=$B" >> $GITHUB_OUTPUT
-          echo "[i] 内核版本 ${{ matrix.kernel_line }}: $([ $B -eq 1 ] && echo '构建' || echo '跳过')"
-      - name: 跳过标记
+          echo "[i] Kernel ${{ matrix.kernel_line }}: $([ $B -eq 1 ] && echo 'BUILD' || echo 'SKIP')"
+      - name: Skip marker
         if: steps.filter.outputs.build != '1'
         run: echo "Skip ${{ matrix.kernel_line }}"
-      - name: 安装依赖
+      - name: Install dependencies
         if: steps.filter.outputs.build == '1'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends cpio libelf-dev bc flex bison python3 rsync build-essential zip unzip file jq git lld clang llvm llvm-dev llvm-runtime
           echo "[i] Host clang:"; clang --version || true
           echo "[i] Host ld.lld path:"; command -v ld.lld || true
-          # 某些 runner 镜像可能只有 /usr/lib/llvm-*/bin/ld.lld 未放入 PATH
           if ! command -v ld.lld >/dev/null 2>&1; then
             FOUND=$(command -v /usr/lib/llvm-*/bin/ld.lld 2>/dev/null | head -n1 || true)
             if [[ -n "$FOUND" ]]; then sudo ln -sf "$FOUND" /usr/local/bin/ld.lld; fi
           fi
-          if ! command -v ld.lld >/dev/null 2>&1; then echo "::error ::仍未找到 ld.lld"; exit 2; fi
-      - name: 分支候选 (准备)
+          if ! command -v ld.lld >/dev/null 2>&1; then echo "::error ::Still missing ld.lld"; exit 2; fi
+      - name: Branch selection preparation
         if: steps.filter.outputs.build == '1'
         id: branch_select
         run: |
@@ -122,13 +121,13 @@ jobs:
             5.10) CANDIDATES=(android12-5.10 android13-5.10 android-mainline); OUT=gki/out-5.10 ;;
             5.15) CANDIDATES=(android13-5.15 android14-6.1 android-mainline); OUT=gki/out-5.15 ;;
             6.1)  CANDIDATES=(android14-6.1 android-mainline); OUT=gki/out-6.1 ;;
-            *) echo '未知 kernel_line' >&2; exit 2;;
+            *) echo 'Unknown kernel_line' >&2; exit 2;;
           esac
           mkdir -p gki "$OUT"
           echo "candidates=${CANDIDATES[*]}" >> $GITHUB_OUTPUT
           echo "out=$OUT" >> $GITHUB_OUTPUT
-          echo "[i] 候选分支: ${CANDIDATES[*]}"
-      - name: 选择并克隆分支
+          echo "[i] Candidate branches: ${CANDIDATES[*]}"
+      - name: Select and clone branch
         if: steps.filter.outputs.build == '1'
         id: fetch_kernel
         run: |
@@ -137,13 +136,13 @@ jobs:
           CUSTOM_URL='${{ inputs.custom_repo_url }}'
           CUSTOM_REF='${{ inputs.custom_ref }}'
           if [[ -n "$CUSTOM_URL" && -n "$CUSTOM_REF" ]]; then
-            echo "[i] 使用自定义仓库: $CUSTOM_URL @ $CUSTOM_REF"
+            echo "[i] Using custom repo: $CUSTOM_URL @ $CUSTOM_REF"
             git clone --depth=1 --branch "$CUSTOM_REF" "$CUSTOM_URL" gki/custom-src
             SELECTED="$CUSTOM_REF"; SRC_PATH="gki/custom-src"
           else
             SELECTED=""
             for cand in $CANDIDATES; do
-              echo "[i] 尝试分支: $cand"
+              echo "[i] Trying branch: $cand"
               if [[ -d gki/$cand && -f gki/$cand/Makefile ]]; then
                 SELECTED="$cand"; SRC_PATH="gki/$cand"; break
               fi
@@ -154,31 +153,31 @@ jobs:
             done
           fi
           if [[ -z "$SELECTED" ]]; then
-            echo "::error ::未能匹配任何有效分支 ($CANDIDATES)，可提供 custom_repo_url+custom_ref"; exit 2
+            echo "::error ::No valid branch found ($CANDIDATES), provide custom_repo_url+custom_ref"; exit 2
           fi
           echo "branch=$SELECTED" >> $GITHUB_OUTPUT
           echo "src=$SRC_PATH" >> $GITHUB_OUTPUT
           echo "out=${{ steps.branch_select.outputs.out }}" >> $GITHUB_OUTPUT
-          echo "[i] 已选择: $SELECTED -> $SRC_PATH"
-      - name: 强制刷新源码 (可选)
+          echo "[i] Selected: $SELECTED -> $SRC_PATH"
+      - name: Force refresh sources (optional)
         if: steps.filter.outputs.build == '1' && inputs.refresh_sources
         run: |
           SRC='${{ steps.fetch_kernel.outputs.src }}'
           BR='${{ steps.fetch_kernel.outputs.branch }}'
           if [[ "$SRC" == gki/custom-src ]]; then
-            echo "[i] 自定义仓库不自动刷新"
+            echo "[i] Custom repo not auto-refreshed"
           else
-            echo "[i] 刷新 $BR"
+            echo "[i] Refreshing $BR"
             rm -rf "$SRC"
             git clone --depth=1 --branch "$BR" https://android.googlesource.com/kernel/common "$SRC"
           fi
-      - name: 启用调试模式
+      - name: Enable debug mode
         if: steps.filter.outputs.build == '1' && inputs.enable_debug
         run: |
           echo "VERBOSE_BUILD=1" >> $GITHUB_ENV
           echo "DEBUG_MODE=1" >> $GITHUB_ENV
-          echo "[i] 调试模式已启用 - 将显示详细日志"
-      - name: 生成元数据 (日期+模块哈希)
+          echo "[i] Debug mode enabled - verbose logs will be shown"
+      - name: Generate metadata (date+module hash)
         if: steps.filter.outputs.build == '1'
         id: meta
         run: |
@@ -187,7 +186,7 @@ jobs:
           echo "date=$DATE_TAG" >> $GITHUB_OUTPUT
           echo "mod_hash=$MOD_HASH" >> $GITHUB_OUTPUT
           echo "::notice title=ModuleHash::$MOD_HASH"
-      - name: 缓存源码
+      - name: Cache sources
         if: steps.filter.outputs.build == '1' && !inputs.skip_cache
         uses: actions/cache@v4
         with:
@@ -195,7 +194,7 @@ jobs:
           key: src-${{ steps.fetch_kernel.outputs.branch }}-${{ steps.meta.outputs.date }}-${{ inputs.skip_cache }}
           restore-keys: |
             src-${{ steps.fetch_kernel.outputs.branch }}-
-      - name: 缓存 out
+      - name: Cache out
         if: steps.filter.outputs.build == '1' && !inputs.skip_cache
         uses: actions/cache@v4
         with:
@@ -204,7 +203,7 @@ jobs:
           restore-keys: |
             out-${{ steps.fetch_kernel.outputs.branch }}-${{ steps.meta.outputs.date }}-
             out-${{ steps.fetch_kernel.outputs.branch }}-
-      - name: 缓存 ccache
+      - name: Cache ccache
         if: steps.filter.outputs.build == '1' && !inputs.skip_cache
         uses: actions/cache@v4
         with:
@@ -212,10 +211,10 @@ jobs:
           key: ccache-${{ steps.fetch_kernel.outputs.branch }}-${{ steps.meta.outputs.mod_hash }}-${{ inputs.skip_cache }}
           restore-keys: |
             ccache-${{ steps.fetch_kernel.outputs.branch }}-
-      - name: 跳过缓存提示
+      - name: Skip cache notice
         if: steps.filter.outputs.build == '1' && inputs.skip_cache
-        run: echo "[i] 跳过缓存 - 将进行完全重新构建"
-      - name: 构建模块
+        run: echo "[i] Skipping cache - full rebuild will be performed"
+      - name: Build batt module
         if: steps.filter.outputs.build == '1' && (inputs.build_type == 'both' || inputs.build_type == 'batt_only')
         run: |
           set -e
@@ -227,29 +226,29 @@ jobs:
           CLANG_TRIPLE=aarch64-linux-gnu-
           export LLVM=1 LLVM_IAS=1 ARCH CROSS_COMPILE CLANG_TRIPLE
           echo "[dbg] ENV ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE CLANG_TRIPLE=$CLANG_TRIPLE LLVM=$LLVM LLVM_IAS=$LLVM_IAS"
-          [[ "${DEBUG_MODE:-0}" == "1" ]] && echo "[debug] 详细构建信息已启用"
+          [[ "${DEBUG_MODE:-0}" == "1" ]] && echo "[debug] Verbose build info enabled"
           clang --version | head -n1 || true
-          if ! command -v ld.lld >/dev/null 2>&1; then echo "::error ::缺少 ld.lld"; exit 2; fi
+          if ! command -v ld.lld >/dev/null 2>&1; then echo "::error ::Missing ld.lld"; exit 2; fi
           
-          # 生成 .config
+          # Generate .config
           if [[ ! -f "$KERNEL_OUT/.config" ]]; then
             if ! make -C "$KERNEL_SRC" O="$KERNEL_OUT" ARCH=$ARCH LLVM=1 LLVM_IAS=1 \
               CC=clang LD=ld.lld CLANG_TRIPLE=$CLANG_TRIPLE CROSS_COMPILE=$CROSS_COMPILE \
               LLVM_AR=llvm-ar LLVM_NM=llvm-nm LLVM_OBJCOPY=llvm-objcopy LLVM_OBJDUMP=llvm-objdump \
               READELF=llvm-readelf STRIP=llvm-strip gki_defconfig; then
-              echo "::group::可用 *gki* defconfig 列表"; ls "$KERNEL_SRC"/arch/arm64/configs/*gki* 2>/dev/null || true; echo "::endgroup::";
-              echo "::error ::gki_defconfig 失败 (branch='${{ steps.fetch_kernel.outputs.branch }}')"; exit 2; fi
+              echo "::group::Available *gki* defconfig list"; ls "$KERNEL_SRC"/arch/arm64/configs/*gki* 2>/dev/null || true; echo "::endgroup::";
+              echo "::error ::gki_defconfig failed (branch='${{ steps.fetch_kernel.outputs.branch }}')"; exit 2; fi
           else
-            echo "[i] 发现现有 .config -> olddefconfig";
+            echo "[i] Found existing .config -> olddefconfig";
             make -C "$KERNEL_SRC" O="$KERNEL_OUT" ARCH=$ARCH LLVM=1 LLVM_IAS=1 \
               CC=clang LD=ld.lld CLANG_TRIPLE=$CLANG_TRIPLE CROSS_COMPILE=$CROSS_COMPILE \
               LLVM_AR=llvm-ar LLVM_NM=llvm-nm LLVM_OBJCOPY=llvm-objcopy LLVM_OBJDUMP=llvm-objdump \
               READELF=llvm-readelf STRIP=llvm-strip olddefconfig
           fi
           
-          # 禁用 IKHEADERS (缺少 cpio 时)
+          # Disable IKHEADERS (when missing cpio)
           if ! command -v cpio >/dev/null 2>&1; then
-            echo "[i] 未检测到 cpio，禁用 CONFIG_IKHEADERS"
+            echo "[i] No cpio detected, disabling CONFIG_IKHEADERS"
             if grep -q '^CONFIG_IKHEADERS=' "$KERNEL_OUT/.config"; then
               sed -i 's/^CONFIG_IKHEADERS=.*/# CONFIG_IKHEADERS is not set/' "$KERNEL_OUT/.config"
             else
@@ -261,9 +260,9 @@ jobs:
               READELF=llvm-readelf STRIP=llvm-strip olddefconfig
           fi
           
-          # 确保 Module.symvers 存在
+          # Ensure Module.symvers exists
           if [[ ! -f "$KERNEL_OUT/Module.symvers" ]]; then
-            echo "[i] 未发现 Module.symvers，执行 make modules"
+            echo "[i] No Module.symvers found, running make modules"
             make -C "$KERNEL_SRC" O="$KERNEL_OUT" ARCH=$ARCH LLVM=1 LLVM_IAS=1 \
               CC=clang LD=ld.lld CLANG_TRIPLE=$CLANG_TRIPLE CROSS_COMPILE=$CROSS_COMPILE \
               LLVM_AR=llvm-ar LLVM_NM=llvm-nm LLVM_OBJCOPY=llvm-objcopy LLVM_OBJDUMP=llvm-objdump \
@@ -271,70 +270,68 @@ jobs:
               -j$(nproc) modules
           fi
           
-          # ThinLTO 配置 (参考本地脚本)
+          # ThinLTO configuration (from local script)
           if grep -q '^CONFIG_LTO_CLANG_THIN=y' "$KERNEL_OUT/.config" 2>/dev/null; then
             LTO_JOBS=$(nproc)
             export KBUILD_LDFLAGS="${KBUILD_LDFLAGS:-} -Wl,-plugin-opt,jobs=${LTO_JOBS}"
-            echo "[i] 检测到 ThinLTO -> LTO_JOBS=$LTO_JOBS"
+            echo "[i] Detected ThinLTO -> LTO_JOBS=$LTO_JOBS"
           fi
           
-          # 创建编译器 wrapper (关键修复)
+          # Create compiler wrapper (critical fix)
           WRAP_DIR=$(mktemp -d)
           cat >"$WRAP_DIR/clang-wrapper" <<'EOF'
-#!/usr/bin/env bash
-ARGS=()
-SEEN_TRIVIAL=0
-for a in "$@"; do
-  # 移除空对齐 flag
-  if [[ "$a" == -falign-functions= ]]; then
-    continue
-  fi
-  if [[ "$a" == -ftrivial-auto-var-init=zero ]]; then
-    SEEN_TRIVIAL=1
-  fi
-  ARGS+=("$a")
-done
-# 处理 trivial-auto-var-init
-if [[ $SEEN_TRIVIAL -eq 1 ]]; then
-  HAVE_ENABLE=0
-  for x in "${ARGS[@]}"; do
-    [[ "$x" == -enable-trivial-auto-var-init-zero-knowing-it-will-be-removed-from-clang ]] && HAVE_ENABLE=1 && break
-  done
-  if [[ $HAVE_ENABLE -eq 0 ]]; then
-    ARGS+=("-enable-trivial-auto-var-init-zero-knowing-it-will-be-removed-from-clang")
-  fi
-else
-  ARGS+=("-enable-trivial-auto-var-init-zero-knowing-it-will-be-removed-from-clang" "-ftrivial-auto-var-init=zero")
-fi
-CLANG_BIN=$(command -v clang || true)
-exec "$CLANG_BIN" "${ARGS[@]}"
-EOF
+          #!/usr/bin/env bash
+          ARGS=()
+          SEEN_TRIVIAL=0
+          for a in "$@"; do
+            if [[ "$a" == -falign-functions= ]]; then
+              continue
+            fi
+            if [[ "$a" == -ftrivial-auto-var-init=zero ]]; then
+              SEEN_TRIVIAL=1
+            fi
+            ARGS+=("$a")
+          done
+          if [[ $SEEN_TRIVIAL -eq 1 ]]; then
+            HAVE_ENABLE=0
+            for x in "${ARGS[@]}"; do
+              [[ "$x" == -enable-trivial-auto-var-init-zero-knowing-it-will-be-removed-from-clang ]] && HAVE_ENABLE=1 && break
+            done
+            if [[ $HAVE_ENABLE -eq 0 ]]; then
+              ARGS+=("-enable-trivial-auto-var-init-zero-knowing-it-will-be-removed-from-clang")
+            fi
+          else
+            ARGS+=("-enable-trivial-auto-var-init-zero-knowing-it-will-be-removed-from-clang" "-ftrivial-auto-var-init=zero")
+          fi
+          CLANG_BIN=$(command -v clang || true)
+          exec "$CLANG_BIN" "${ARGS[@]}"
+          EOF
           chmod +x "$WRAP_DIR/clang-wrapper"
           export CC="$WRAP_DIR/clang-wrapper"
           export HOSTCC=clang
-          echo "[i] 启用编译器 wrapper: $CC"
+          echo "[i] Enabled compiler wrapper: $CC"
           
-          # 设置 KCFLAGS (重要)
+          # Set KCFLAGS (important)
           EXTRA_KCFLAGS="-Wno-macro-redefined"
           [[ "${DEBUG_MODE:-0}" == "1" ]] && EXTRA_KCFLAGS="$EXTRA_KCFLAGS -DDEBUG"
           
-          # 使用绝对路径的 M
+          # Use absolute path for M
           MOD_DIR_ABS=$(pwd)/extra_modules/batt_design_override
           if [[ ! -f "$MOD_DIR_ABS/Makefile" ]]; then
-            echo "::error ::模块 Makefile 不存在: $MOD_DIR_ABS/Makefile"; ls -l "$MOD_DIR_ABS" || true; exit 2
+            echo "::error ::Module Makefile not found: $MOD_DIR_ABS/Makefile"; ls -l "$MOD_DIR_ABS" || true; exit 2
           fi
-          echo "[i] 使用外部模块目录: $MOD_DIR_ABS"
-          echo "[i] 构建类型: 电池模块 (batt_design_override)"
+          echo "[i] Using external module directory: $MOD_DIR_ABS"
+          echo "[i] Build type: Battery module (batt_design_override)"
           
-          # 构建模块 (使用本地脚本的参数)
+          # Build module (using local script parameters)
           make -C "$KERNEL_SRC" O="$KERNEL_OUT" ARCH=$ARCH LLVM=1 LLVM_IAS=1 \
             CC="$CC" HOSTCC="$HOSTCC" LD=ld.lld CLANG_TRIPLE=$CLANG_TRIPLE CROSS_COMPILE=$CROSS_COMPILE \
             LLVM_AR=llvm-ar LLVM_NM=llvm-nm LLVM_OBJCOPY=llvm-objcopy LLVM_OBJDUMP=llvm-objdump \
             READELF=llvm-readelf STRIP=llvm-strip KCFLAGS="$EXTRA_KCFLAGS" \
             M="$MOD_DIR_ABS" -j$(nproc) modules
           test -f "$MOD_DIR_ABS/batt_design_override.ko"
-          echo "[✓] 电池模块构建完成"
-      - name: 构建 chg 模块
+          echo "[✓] Battery module build completed"
+      - name: Build chg module
         if: steps.filter.outputs.build == '1' && (inputs.build_type == 'both' || inputs.build_type == 'chg_only')
         run: |
           set -e
@@ -346,29 +343,29 @@ EOF
           CLANG_TRIPLE=aarch64-linux-gnu-
           export LLVM=1 LLVM_IAS=1 ARCH CROSS_COMPILE CLANG_TRIPLE
           
-          # 重用编译器 wrapper
+          # Reuse compiler wrapper
           WRAP_DIR=$(mktemp -d)
           cat >"$WRAP_DIR/clang-wrapper" <<'EOF'
-#!/usr/bin/env bash
-ARGS=()
-SEEN_TRIVIAL=0
-for a in "$@"; do
-  [[ "$a" == -falign-functions= ]] && continue
-  [[ "$a" == -ftrivial-auto-var-init=zero ]] && SEEN_TRIVIAL=1
-  ARGS+=("$a")
-done
-if [[ $SEEN_TRIVIAL -eq 1 ]]; then
-  HAVE_ENABLE=0
-  for x in "${ARGS[@]}"; do
-    [[ "$x" == -enable-trivial-auto-var-init-zero-knowing-it-will-be-removed-from-clang ]] && HAVE_ENABLE=1 && break
-  done
-  [[ $HAVE_ENABLE -eq 0 ]] && ARGS+=("-enable-trivial-auto-var-init-zero-knowing-it-will-be-removed-from-clang")
-else
-  ARGS+=("-enable-trivial-auto-var-init-zero-knowing-it-will-be-removed-from-clang" "-ftrivial-auto-var-init=zero")
-fi
-CLANG_BIN=$(command -v clang || true)
-exec "$CLANG_BIN" "${ARGS[@]}"
-EOF
+          #!/usr/bin/env bash
+          ARGS=()
+          SEEN_TRIVIAL=0
+          for a in "$@"; do
+            [[ "$a" == -falign-functions= ]] && continue
+            [[ "$a" == -ftrivial-auto-var-init=zero ]] && SEEN_TRIVIAL=1
+            ARGS+=("$a")
+          done
+          if [[ $SEEN_TRIVIAL -eq 1 ]]; then
+            HAVE_ENABLE=0
+            for x in "${ARGS[@]}"; do
+              [[ "$x" == -enable-trivial-auto-var-init-zero-knowing-it-will-be-removed-from-clang ]] && HAVE_ENABLE=1 && break
+            done
+            [[ $HAVE_ENABLE -eq 0 ]] && ARGS+=("-enable-trivial-auto-var-init-zero-knowing-it-will-be-removed-from-clang")
+          else
+            ARGS+=("-enable-trivial-auto-var-init-zero-knowing-it-will-be-removed-from-clang" "-ftrivial-auto-var-init=zero")
+          fi
+          CLANG_BIN=$(command -v clang || true)
+          exec "$CLANG_BIN" "${ARGS[@]}"
+          EOF
           chmod +x "$WRAP_DIR/clang-wrapper"
           export CC="$WRAP_DIR/clang-wrapper"
           export HOSTCC=clang
@@ -377,18 +374,18 @@ EOF
           [[ "${DEBUG_MODE:-0}" == "1" ]] && EXTRA_KCFLAGS="$EXTRA_KCFLAGS -DDEBUG"
           MOD_DIR_ABS=$(pwd)/extra_modules/chg_param_override
           if [[ ! -f "$MOD_DIR_ABS/Makefile" ]]; then
-            echo "::error ::模块 Makefile 不存在: $MOD_DIR_ABS/Makefile"; exit 2
+            echo "::error ::Module Makefile not found: $MOD_DIR_ABS/Makefile"; exit 2
           fi
-          echo "[i] 使用外部模块目录: $MOD_DIR_ABS"
-          echo "[i] 构建类型: 充电模块 (chg_param_override)"
+          echo "[i] Using external module directory: $MOD_DIR_ABS"
+          echo "[i] Build type: Charging module (chg_param_override)"
           make -C "$KERNEL_SRC" O="$KERNEL_OUT" ARCH=$ARCH LLVM=1 LLVM_IAS=1 \
             CC="$CC" HOSTCC="$HOSTCC" LD=ld.lld CLANG_TRIPLE=$CLANG_TRIPLE CROSS_COMPILE=$CROSS_COMPILE \
             LLVM_AR=llvm-ar LLVM_NM=llvm-nm LLVM_OBJCOPY=llvm-objcopy LLVM_OBJDUMP=llvm-objdump \
             READELF=llvm-readelf STRIP=llvm-strip KCFLAGS="$EXTRA_KCFLAGS" \
             M="$MOD_DIR_ABS" -j$(nproc) modules
           test -f "$MOD_DIR_ABS/chg_param_override.ko"
-          echo "[✓] 充电模块构建完成"
-      - name: 解析版本号
+          echo "[✓] Charging module build completed"
+      - name: Parse version number
         if: steps.filter.outputs.build == '1'
         id: ver
         run: |
@@ -400,11 +397,10 @@ EOF
           fi
           echo VERSION=$VER >> $GITHUB_ENV
           echo "version=$VER" >> $GITHUB_OUTPUT
-      - name: 打包 Magisk 模块
+      - name: Package Magisk module
         if: steps.filter.outputs.build == '1'
         run: |
           mkdir -p dist
-          # 拷入两个 .ko，便于脚本整体打包
           mkdir -p packaging/magisk-batt-design-override/common
           cp -f extra_modules/batt_design_override/batt_design_override.ko packaging/magisk-batt-design-override/common/ || true
           cp -f extra_modules/chg_param_override/chg_param_override.ko packaging/magisk-batt-design-override/common/ || true
@@ -414,7 +410,7 @@ EOF
             --version $VERSION \
             --output dist
           ls -l dist
-      - name: 准备发布文件（重命名 .ko/.apk 避免冲突）
+      - name: Prepare release files
         if: steps.filter.outputs.build == '1'
         run: |
           set -e
@@ -426,13 +422,12 @@ EOF
           if [ -f extra_modules/chg_param_override/chg_param_override.ko ]; then
             cp -f extra_modules/chg_param_override/chg_param_override.ko "release_out/chg_param_override-${ANDROID_TAG}.ko"
           fi
-          # APK 不区分安卓版本：仅在 5.15 这一分支产出一次，避免重复文件名
           if [ -f packaging/magisk-batt-design-override/common/battcaplsp.apk ]; then
             if [ "${{ matrix.kernel_line }}" = "5.15" ]; then
               cp -f packaging/magisk-batt-design-override/common/battcaplsp.apk "release_out/battcaplsp.apk"
             fi
           fi
-      - name: 上传构件
+      - name: Upload artifacts
         if: steps.filter.outputs.build == '1' && inputs.upload_artifacts
         uses: actions/upload-artifact@v4
         with:
