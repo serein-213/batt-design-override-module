@@ -17,8 +17,51 @@ CONF="$COMM_DIR/params.conf"
 FLAG_DISABLE="$MODDIR/disable_autoload"
 KERNEL_LINE="" # 仅用于区分多版本 ko（可选）
 
-log() { echo "[batt-design-override][service] $*"; }
-logw() { echo "[batt-design-override][service][warn] $*"; }
+# Enhanced logging with file output
+LOGFILE="$MODDIR/log.txt"
+_log() { echo "[batt-design-override][service] $*" | tee -a "$LOGFILE" >/dev/null; }
+log() { _log "$*"; }
+logw() { echo "[batt-design-override][service][warn] $*" | tee -a "$LOGFILE" >/dev/null; }
+
+# Enhanced error logging with dmesg support
+log_insmod_error() {
+    local module_path="$1"
+    local module_name="$(basename "$module_path" .ko)"
+    
+    log "insmod failed for $module_name, collecting detailed error information..."
+    
+    # 获取最新的dmesg信息（最近30行）
+    echo "[batt-design-override][service] === dmesg output (last 30 lines) ===" >> "$LOGFILE"
+    dmesg | tail -30 >> "$LOGFILE" 2>/dev/null || echo "dmesg not available" >> "$LOGFILE"
+    
+    # 查找与模块相关的特定错误信息
+    echo "[batt-design-override][service] === module-specific errors ===" >> "$LOGFILE"
+    dmesg | grep -i "$module_name" | tail -10 >> "$LOGFILE" 2>/dev/null || echo "no module-specific dmesg found" >> "$LOGFILE"
+    
+    # 查找一般的内核模块加载错误
+    echo "[batt-design-override][service] === general insmod/modprobe errors ===" >> "$LOGFILE"
+    dmesg | grep -E "(insmod|modprobe|module.*failed|Invalid module|Unknown symbol)" | tail -10 >> "$LOGFILE" 2>/dev/null || echo "no general module errors found" >> "$LOGFILE"
+    
+    # 检查模块文件信息
+    echo "[batt-design-override][service] === module file info ===" >> "$LOGFILE"
+    ls -la "$module_path" >> "$LOGFILE" 2>/dev/null || echo "module file not found: $module_path" >> "$LOGFILE"
+    
+    # 检查内核版本兼容性
+    echo "[batt-design-override][service] === kernel compatibility check ===" >> "$LOGFILE"
+    echo "Current kernel: $(uname -r)" >> "$LOGFILE"
+    if command -v modinfo >/dev/null 2>&1; then
+        modinfo "$module_path" 2>/dev/null | grep -E "(vermagic|depends)" >> "$LOGFILE" || echo "modinfo failed or not available" >> "$LOGFILE"
+    fi
+    
+    # 检查模块依赖
+    if [ -f /proc/modules ]; then
+        echo "[batt-design-override][service] === loaded modules check ===" >> "$LOGFILE"
+        grep -E "(battery|power_supply|qcom)" /proc/modules >> "$LOGFILE" 2>/dev/null || echo "no related modules found in /proc/modules" >> "$LOGFILE"
+    fi
+    
+    echo "[batt-design-override][service] === end of detailed error report ===" >> "$LOGFILE"
+    log "detailed error information collected, check $LOGFILE for full report"
+}
 
 if [ -f "$FLAG_DISABLE" ]; then
   log "disable_autoload 存在，跳过加载"
@@ -57,13 +100,21 @@ ARGS=$(echo "$ARGS" | sed 's/^ *//')
 
 log "加载模块: $KO_SELECTED 参数: $ARGS"
 # 优先使用 insmod；如果失败尝试 modprobe （多数 AOSP 系统不含）
-if ! insmod "$KO_SELECTED" $ARGS 2>&1; then
+if ! insmod "$KO_SELECTED" $ARGS 2>>"$LOGFILE"; then
+  log_insmod_error "$KO_SELECTED"
   if command -v modprobe >/dev/null 2>&1; then
     log "insmod 失败，尝试 modprobe"
-    modprobe "$KO_SELECTED" $ARGS || log "modprobe 也失败"
+    if modprobe "$KO_SELECTED" $ARGS 2>>"$LOGFILE"; then
+      log "modprobe 成功"
+    else
+      log "modprobe 也失败"
+      log_insmod_error "$KO_SELECTED"
+    fi
   else
     log "insmod 失败且无 modprobe 可用"
   fi
+else
+  log "insmod 成功"
 fi
 
 # ========== 可选：加载 chg_param_override.ko 并应用参数 ==========
@@ -75,13 +126,21 @@ if [ -f "$CHG_KO" ]; then
   CHG_ARGS=""
   # chg 模块不通过 insmod 参数配置，采用 proc 接口；这里只负责加载
   log "检测到 chg 模块，尝试加载: $CHG_KO"
-  if ! insmod "$CHG_KO" 2>&1; then
+  if ! insmod "$CHG_KO" 2>>"$LOGFILE"; then
+    log_insmod_error "$CHG_KO"
     if command -v modprobe >/dev/null 2>&1; then
       log "insmod chg 失败，尝试 modprobe"
-      modprobe "$CHG_KO" || logw "modprobe chg 也失败"
+      if modprobe "$CHG_KO" 2>>"$LOGFILE"; then
+        log "modprobe chg 成功"
+      else
+        logw "modprobe chg 也失败"
+        log_insmod_error "$CHG_KO"
+      fi
     else
       logw "insmod chg 失败且无 modprobe 可用"
     fi
+  else
+    log "insmod chg 成功"
   fi
 
   # 通过 /proc/chg_param_override 写入配置

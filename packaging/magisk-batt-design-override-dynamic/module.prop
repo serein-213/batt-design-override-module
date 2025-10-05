@@ -1,0 +1,7 @@
+id=batt-design-override-dynamic
+name=Battery Design Override (Dynamic)
+version=2.0.0
+versionCode=200
+author=serein-213
+minMagisk=20.4
+description=内核级修改手机电池设计容量 (动态版本 - 从应用获取内核模块)
