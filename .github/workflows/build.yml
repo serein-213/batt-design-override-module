@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       kernel_lines:
-        description: '内核主线列表: 5.4,5.10,5.15,6.1 (空=全部)'
+        description: '内核主线列表: 5.4,5.10,5.15,6.1,6.6 (空=全部)'
         required: false
         default: ''
       version:
@@ -31,10 +31,12 @@ on:
 jobs:
   build:
     runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
     strategy:
       fail-fast: false
       matrix:
-        kernel_line: ["5.4", "5.10", "5.15", "6.1"]
+        kernel_line: ["5.4", "5.10", "5.15", "6.1", "6.6"]
     env:
       MODULE_ID: batt-design-override
       MAGISK_DIR: packaging/magisk-batt-design-override
@@ -80,6 +82,7 @@ jobs:
             5.10) CANDIDATES=(android12-5.10 android13-5.10 android-mainline); OUT=gki/out-5.10 ;;
             5.15) CANDIDATES=(android13-5.15 android14-6.1 android-mainline); OUT=gki/out-5.15 ;;
             6.1)  CANDIDATES=(android14-6.1 android-mainline); OUT=gki/out-6.1 ;;
+            6.6)  CANDIDATES=(android16-6.6 android-mainline); OUT=gki/out-6.6 ;;
             *) echo '未知 kernel_line' >&2; exit 2;;
           esac
           mkdir -p gki "$OUT"
@@ -268,15 +271,31 @@ jobs:
             --version $VERSION \
             --output dist
           ls -l dist
+      - name: 准备发布文件（重命名 .ko/.apk 避免冲突）
+        if: steps.filter.outputs.build == '1'
+        run: |
+          set -e
+          ANDROID_TAG='${{ steps.fetch_kernel.outputs.branch }}'
+          mkdir -p release_out
+          if [ -f extra_modules/batt_design_override/batt_design_override.ko ]; then
+            cp -f extra_modules/batt_design_override/batt_design_override.ko "release_out/batt_design_override-${ANDROID_TAG}.ko"
+          fi
+          if [ -f extra_modules/chg_param_override/chg_param_override.ko ]; then
+            cp -f extra_modules/chg_param_override/chg_param_override.ko "release_out/chg_param_override-${ANDROID_TAG}.ko"
+          fi
+          # APK 不区分安卓版本：仅在 5.15 这一分支产出一次，避免重复文件名
+          if [ -f packaging/magisk-batt-design-override/common/battcaplsp.apk ]; then
+            if [ "${{ matrix.kernel_line }}" = "5.15" ]; then
+              cp -f packaging/magisk-batt-design-override/common/battcaplsp.apk "release_out/battcaplsp.apk"
+            fi
+          fi
       - name: 上传构件
         if: steps.filter.outputs.build == '1'
         uses: actions/upload-artifact@v4
         with:
           name: batt-design-override-${{ matrix.kernel_line }}
           path: |
-            extra_modules/batt_design_override/batt_design_override.ko
-            extra_modules/chg_param_override/chg_param_override.ko
-            packaging/magisk-batt-design-override/common/battcaplsp.apk
+            release_out/*
             dist/*.zip
           if-no-files-found: error
 
@@ -299,13 +318,11 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: battmod-${{ github.run_number }}
-          name: battmod-${{ github.run_number }}
+          tag_name: ${{ needs.build.outputs.version }}
+          name: ${{ needs.build.outputs.version }}
           body_path: NOTES.md
           files: |
             collected/**/dist/*.zip
-            collected/**/batt_design_override.ko
-            collected/**/chg_param_override.ko
-            collected/**/battcaplsp.apk
+            collected/**/release_out/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
