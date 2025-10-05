@@ -179,6 +179,8 @@ jobs:
           echo "[dbg] ENV ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE CLANG_TRIPLE=$CLANG_TRIPLE LLVM=$LLVM LLVM_IAS=$LLVM_IAS"
           clang --version | head -n1 || true
           if ! command -v ld.lld >/dev/null 2>&1; then echo "::error ::缺少 ld.lld"; exit 2; fi
+          
+          # 生成 .config
           if [[ ! -f "$KERNEL_OUT/.config" ]]; then
             if ! make -C "$KERNEL_SRC" O="$KERNEL_OUT" ARCH=$ARCH LLVM=1 LLVM_IAS=1 \
               CC=clang LD=ld.lld CLANG_TRIPLE=$CLANG_TRIPLE CROSS_COMPILE=$CROSS_COMPILE \
@@ -186,43 +188,96 @@ jobs:
               READELF=llvm-readelf STRIP=llvm-strip gki_defconfig; then
               echo "::group::可用 *gki* defconfig 列表"; ls "$KERNEL_SRC"/arch/arm64/configs/*gki* 2>/dev/null || true; echo "::endgroup::";
               echo "::error ::gki_defconfig 失败 (branch='${{ steps.fetch_kernel.outputs.branch }}')"; exit 2; fi
-          fi
-          # 使用 scripts/config 精准关闭占内存/耗时特性，只保留最小构建环境
-          if [[ -x "$KERNEL_SRC/scripts/config" ]]; then
-            CFGTOOL="$KERNEL_SRC/scripts/config"
           else
-            CFGTOOL="$KERNEL_OUT/scripts/config"
+            echo "[i] 发现现有 .config -> olddefconfig";
+            make -C "$KERNEL_SRC" O="$KERNEL_OUT" ARCH=$ARCH LLVM=1 LLVM_IAS=1 \
+              CC=clang LD=ld.lld CLANG_TRIPLE=$CLANG_TRIPLE CROSS_COMPILE=$CROSS_COMPILE \
+              LLVM_AR=llvm-ar LLVM_NM=llvm-nm LLVM_OBJCOPY=llvm-objcopy LLVM_OBJDUMP=llvm-objdump \
+              READELF=llvm-readelf STRIP=llvm-strip olddefconfig
           fi
-          if [[ -x "$CFGTOOL" ]]; then
-            $CFGTOOL --file "$KERNEL_OUT/.config" \
-              -d LTO_CLANG_THIN -d LTO_CLANG_FULL -e LTO_NONE -d THINLTO \
-              -d MODVERSIONS -d CFI_CLANG -d KASAN -d KCSAN -d UBSAN || true
-          else
-            echo "[warn] scripts/config 不可执行，回退 sed 方式";
-            sed -i 's/^CONFIG_LTO_CLANG_THIN=y/# CONFIG_LTO_CLANG_THIN is not set/' $KERNEL_OUT/.config 2>/dev/null || true
-            sed -i 's/^CONFIG_LTO_CLANG_FULL=y/# CONFIG_LTO_CLANG_FULL is not set/' $KERNEL_OUT/.config 2>/dev/null || true
-            grep -q '^CONFIG_LTO_NONE=y' $KERNEL_OUT/.config || echo 'CONFIG_LTO_NONE=y' >> $KERNEL_OUT/.config
-            sed -i 's/^CONFIG_THINLTO=y/# CONFIG_THINLTO is not set/' $KERNEL_OUT/.config 2>/dev/null || true
-            sed -i 's/^CONFIG_MODVERSIONS=y/# CONFIG_MODVERSIONS is not set/' $KERNEL_OUT/.config 2>/dev/null || true
-            sed -i 's/^CONFIG_CFI_CLANG=y/# CONFIG_CFI_CLANG is not set/' $KERNEL_OUT/.config 2>/dev/null || true
-            sed -i 's/^CONFIG_KASAN=.*/# CONFIG_KASAN is not set/' $KERNEL_OUT/.config 2>/dev/null || true
-            sed -i 's/^CONFIG_KCSAN=y/# CONFIG_KCSAN is not set/' $KERNEL_OUT/.config 2>/dev/null || true
-            sed -i 's/^CONFIG_UBSAN=y/# CONFIG_UBSAN is not set/' $KERNEL_OUT/.config 2>/dev/null || true
+          
+          # 禁用 IKHEADERS (缺少 cpio 时)
+          if ! command -v cpio >/dev/null 2>&1; then
+            echo "[i] 未检测到 cpio，禁用 CONFIG_IKHEADERS"
+            if grep -q '^CONFIG_IKHEADERS=' "$KERNEL_OUT/.config"; then
+              sed -i 's/^CONFIG_IKHEADERS=.*/# CONFIG_IKHEADERS is not set/' "$KERNEL_OUT/.config"
+            else
+              echo '# CONFIG_IKHEADERS is not set' >> "$KERNEL_OUT/.config"
+            fi
+            make -C "$KERNEL_SRC" O="$KERNEL_OUT" ARCH=$ARCH LLVM=1 LLVM_IAS=1 \
+              CC=clang LD=ld.lld CLANG_TRIPLE=$CLANG_TRIPLE CROSS_COMPILE=$CROSS_COMPILE \
+              LLVM_AR=llvm-ar LLVM_NM=llvm-nm LLVM_OBJCOPY=llvm-objcopy LLVM_OBJDUMP=llvm-objdump \
+              READELF=llvm-readelf STRIP=llvm-strip olddefconfig
           fi
-          yes "" | make -C "$KERNEL_SRC" O="$KERNEL_OUT" ARCH=$ARCH LLVM=1 LLVM_IAS=1 CC=clang LD=ld.lld olddefconfig >/dev/null 2>&1 || true
-          make -C "$KERNEL_SRC" O="$KERNEL_OUT" ARCH=$ARCH LLVM=1 LLVM_IAS=1 CC=clang LD=ld.lld olddefconfig || true
-          echo "[dbg] 已禁用的特性 (LTO/MODVERSIONS/CFI/KASAN/KCSAN/UBSAN) 状态:"; egrep 'LTO|MODVERSIONS|CFI|KASAN|KCSAN|UBSAN' $KERNEL_OUT/.config || true
-          echo "[i] 仅执行 prepare/modules_prepare，避免进入整树 modules 导致 OOM"
-          make -C "$KERNEL_SRC" O="$KERNEL_OUT" ARCH=$ARCH LLVM=1 LLVM_IAS=1 prepare modules_prepare || true
-          # 使用绝对路径的 M，避免内核构建系统在 $KERNEL_SRC 下解析相对 extra_modules/ 路径失败
+          
+          # 确保 Module.symvers 存在
+          if [[ ! -f "$KERNEL_OUT/Module.symvers" ]]; then
+            echo "[i] 未发现 Module.symvers，执行 make modules"
+            make -C "$KERNEL_SRC" O="$KERNEL_OUT" ARCH=$ARCH LLVM=1 LLVM_IAS=1 \
+              CC=clang LD=ld.lld CLANG_TRIPLE=$CLANG_TRIPLE CROSS_COMPILE=$CROSS_COMPILE \
+              LLVM_AR=llvm-ar LLVM_NM=llvm-nm LLVM_OBJCOPY=llvm-objcopy LLVM_OBJDUMP=llvm-objdump \
+              READELF=llvm-readelf STRIP=llvm-strip \
+              -j$(nproc) modules
+          fi
+          
+          # ThinLTO 配置 (参考本地脚本)
+          if grep -q '^CONFIG_LTO_CLANG_THIN=y' "$KERNEL_OUT/.config" 2>/dev/null; then
+            LTO_JOBS=$(nproc)
+            export KBUILD_LDFLAGS="${KBUILD_LDFLAGS:-} -Wl,-plugin-opt,jobs=${LTO_JOBS}"
+            echo "[i] 检测到 ThinLTO -> LTO_JOBS=$LTO_JOBS"
+          fi
+          
+          # 创建编译器 wrapper (关键修复)
+          WRAP_DIR=$(mktemp -d)
+          cat >"$WRAP_DIR/clang-wrapper" <<'EOF'
+#!/usr/bin/env bash
+ARGS=()
+SEEN_TRIVIAL=0
+for a in "$@"; do
+  # 移除空对齐 flag
+  if [[ "$a" == -falign-functions= ]]; then
+    continue
+  fi
+  if [[ "$a" == -ftrivial-auto-var-init=zero ]]; then
+    SEEN_TRIVIAL=1
+  fi
+  ARGS+=("$a")
+done
+# 处理 trivial-auto-var-init
+if [[ $SEEN_TRIVIAL -eq 1 ]]; then
+  HAVE_ENABLE=0
+  for x in "${ARGS[@]}"; do
+    [[ "$x" == -enable-trivial-auto-var-init-zero-knowing-it-will-be-removed-from-clang ]] && HAVE_ENABLE=1 && break
+  done
+  if [[ $HAVE_ENABLE -eq 0 ]]; then
+    ARGS+=("-enable-trivial-auto-var-init-zero-knowing-it-will-be-removed-from-clang")
+  fi
+else
+  ARGS+=("-enable-trivial-auto-var-init-zero-knowing-it-will-be-removed-from-clang" "-ftrivial-auto-var-init=zero")
+fi
+CLANG_BIN=$(command -v clang || true)
+exec "$CLANG_BIN" "${ARGS[@]}"
+EOF
+          chmod +x "$WRAP_DIR/clang-wrapper"
+          export CC="$WRAP_DIR/clang-wrapper"
+          export HOSTCC=clang
+          echo "[i] 启用编译器 wrapper: $CC"
+          
+          # 设置 KCFLAGS (重要)
+          EXTRA_KCFLAGS="-Wno-macro-redefined"
+          
+          # 使用绝对路径的 M
           MOD_DIR_ABS=$(pwd)/extra_modules/batt_design_override
           if [[ ! -f "$MOD_DIR_ABS/Makefile" ]]; then
             echo "::error ::模块 Makefile 不存在: $MOD_DIR_ABS/Makefile"; ls -l "$MOD_DIR_ABS" || true; exit 2
           fi
           echo "[i] 使用外部模块目录: $MOD_DIR_ABS"
-          # Kbuild 允许直接 M=<absolute path>
+          
+          # 构建模块 (使用本地脚本的参数)
           make -C "$KERNEL_SRC" O="$KERNEL_OUT" ARCH=$ARCH LLVM=1 LLVM_IAS=1 \
-            CC=clang LD=ld.lld CLANG_TRIPLE=$CLANG_TRIPLE CROSS_COMPILE=$CROSS_COMPILE \
+            CC="$CC" HOSTCC="$HOSTCC" LD=ld.lld CLANG_TRIPLE=$CLANG_TRIPLE CROSS_COMPILE=$CROSS_COMPILE \
+            LLVM_AR=llvm-ar LLVM_NM=llvm-nm LLVM_OBJCOPY=llvm-objcopy LLVM_OBJDUMP=llvm-objdump \
+            READELF=llvm-readelf STRIP=llvm-strip KCFLAGS="$EXTRA_KCFLAGS" \
             M="$MOD_DIR_ABS" -j$(nproc) modules
           test -f "$MOD_DIR_ABS/batt_design_override.ko"
       - name: 构建 chg 模块
@@ -235,13 +290,44 @@ jobs:
           CROSS_COMPILE=aarch64-linux-gnu-
           CLANG_TRIPLE=aarch64-linux-gnu-
           export LLVM=1 LLVM_IAS=1 ARCH CROSS_COMPILE CLANG_TRIPLE
+          
+          # 重用编译器 wrapper
+          WRAP_DIR=$(mktemp -d)
+          cat >"$WRAP_DIR/clang-wrapper" <<'EOF'
+#!/usr/bin/env bash
+ARGS=()
+SEEN_TRIVIAL=0
+for a in "$@"; do
+  [[ "$a" == -falign-functions= ]] && continue
+  [[ "$a" == -ftrivial-auto-var-init=zero ]] && SEEN_TRIVIAL=1
+  ARGS+=("$a")
+done
+if [[ $SEEN_TRIVIAL -eq 1 ]]; then
+  HAVE_ENABLE=0
+  for x in "${ARGS[@]}"; do
+    [[ "$x" == -enable-trivial-auto-var-init-zero-knowing-it-will-be-removed-from-clang ]] && HAVE_ENABLE=1 && break
+  done
+  [[ $HAVE_ENABLE -eq 0 ]] && ARGS+=("-enable-trivial-auto-var-init-zero-knowing-it-will-be-removed-from-clang")
+else
+  ARGS+=("-enable-trivial-auto-var-init-zero-knowing-it-will-be-removed-from-clang" "-ftrivial-auto-var-init=zero")
+fi
+CLANG_BIN=$(command -v clang || true)
+exec "$CLANG_BIN" "${ARGS[@]}"
+EOF
+          chmod +x "$WRAP_DIR/clang-wrapper"
+          export CC="$WRAP_DIR/clang-wrapper"
+          export HOSTCC=clang
+          
+          EXTRA_KCFLAGS="-Wno-macro-redefined"
           MOD_DIR_ABS=$(pwd)/extra_modules/chg_param_override
           if [[ ! -f "$MOD_DIR_ABS/Makefile" ]]; then
             echo "::error ::模块 Makefile 不存在: $MOD_DIR_ABS/Makefile"; exit 2
           fi
           echo "[i] 使用外部模块目录: $MOD_DIR_ABS"
           make -C "$KERNEL_SRC" O="$KERNEL_OUT" ARCH=$ARCH LLVM=1 LLVM_IAS=1 \
-            CC=clang LD=ld.lld CLANG_TRIPLE=$CLANG_TRIPLE CROSS_COMPILE=$CROSS_COMPILE \
+            CC="$CC" HOSTCC="$HOSTCC" LD=ld.lld CLANG_TRIPLE=$CLANG_TRIPLE CROSS_COMPILE=$CROSS_COMPILE \
+            LLVM_AR=llvm-ar LLVM_NM=llvm-nm LLVM_OBJCOPY=llvm-objcopy LLVM_OBJDUMP=llvm-objdump \
+            READELF=llvm-readelf STRIP=llvm-strip KCFLAGS="$EXTRA_KCFLAGS" \
             M="$MOD_DIR_ABS" -j$(nproc) modules
           test -f "$MOD_DIR_ABS/chg_param_override.ko"
       - name: 解析版本号
