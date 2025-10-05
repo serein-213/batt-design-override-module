@@ -14,6 +14,7 @@ name: Build batt_design_override (Auto GKI Fetch)
           - '5.10'
           - '5.4'
           - '5.4,5.10,5.15,6.1'
+
       build_type:
         description: 'Build type'
         type: choice
@@ -23,38 +24,46 @@ name: Build batt_design_override (Auto GKI Fetch)
           - 'both'
           - 'batt_only'
           - 'chg_only'
+
       version:
         description: 'Module version (empty=auto)'
         required: false
         default: ''
+
       release:
         description: 'Create Release'
         type: boolean
         required: false
         default: false
+
       refresh_sources:
         description: 'Force refresh GKI source cache'
         type: boolean
         required: false
         default: false
+
       enable_debug:
         description: 'Enable debug mode (verbose logs)'
         type: boolean
         required: false
         default: false
+
       custom_repo_url:
         description: 'Custom kernel source repo (optional)'
         required: false
         default: ''
+
       custom_ref:
         description: 'Custom repo branch/tag'
         required: false
         default: ''
+
       upload_artifacts:
         description: 'Upload build artifacts'
         type: boolean
         required: false
         default: true
+
       skip_cache:
         description: 'Skip cache (force rebuild)'
         type: boolean
@@ -66,10 +75,12 @@ jobs:
     runs-on: ubuntu-22.04
     outputs:
       version: ${{ steps.ver.outputs.version }}
+
     strategy:
       fail-fast: false
       matrix:
         kernel_line: ["5.4", "5.10", "5.15", "6.1"]
+
     env:
       MODULE_ID: batt-design-override
       MAGISK_DIR: packaging/magisk-batt-design-override
@@ -79,8 +90,10 @@ jobs:
       LLVM_IAS: 1
       JOBS: 8
       LTO_JOBS: 8
+
     steps:
       - uses: actions/checkout@v4
+
       - name: Filter required kernels
         id: filter
         run: |
@@ -97,36 +110,50 @@ jobs:
           fi
           echo "build=$B" >> $GITHUB_OUTPUT
           echo "[i] Kernel ${{ matrix.kernel_line }}: $([ $B -eq 1 ] && echo 'BUILD' || echo 'SKIP')"
+
       - name: Skip marker
         if: steps.filter.outputs.build != '1'
         run: echo "Skip ${{ matrix.kernel_line }}"
+
       - name: Install dependencies
         if: steps.filter.outputs.build == '1'
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends cpio libelf-dev bc flex bison python3 rsync build-essential zip unzip file jq git lld clang llvm llvm-dev llvm-runtime
+          sudo apt-get install -y --no-install-recommends \
+            cpio libelf-dev bc flex bison python3 rsync \
+            build-essential zip unzip file jq git \
+            lld clang llvm llvm-dev llvm-runtime
           echo "[i] Host clang:"; clang --version || true
           echo "[i] Host ld.lld path:"; command -v ld.lld || true
           if ! command -v ld.lld >/dev/null 2>&1; then
             FOUND=$(command -v /usr/lib/llvm-*/bin/ld.lld 2>/dev/null | head -n1 || true)
-            if [[ -n "$FOUND" ]]; then sudo ln -sf "$FOUND" /usr/local/bin/ld.lld; fi
+            [[ -n "$FOUND" ]] && sudo ln -sf "$FOUND" /usr/local/bin/ld.lld
           fi
-          if ! command -v ld.lld >/dev/null 2>&1; then echo "::error ::Still missing ld.lld"; exit 2; fi
+          if ! command -v ld.lld >/dev/null 2>&1; then
+            echo "::error ::Still missing ld.lld"
+            exit 2
+          fi
+
       - name: Branch selection preparation
         if: steps.filter.outputs.build == '1'
         id: branch_select
         run: |
           case "${{ matrix.kernel_line }}" in
-            5.4)  CANDIDATES=(android11-5.4 android12-5.10 android-mainline); OUT=gki/out-5.4 ;;
-            5.10) CANDIDATES=(android12-5.10 android13-5.10 android-mainline); OUT=gki/out-5.10 ;;
-            5.15) CANDIDATES=(android13-5.15 android14-6.1 android-mainline); OUT=gki/out-5.15 ;;
-            6.1)  CANDIDATES=(android14-6.1 android-mainline); OUT=gki/out-6.1 ;;
+            5.4)  CANDIDATES=(android11-5.4 android12-5.10 android-mainline)
+                  OUT=gki/out-5.4 ;;
+            5.10) CANDIDATES=(android12-5.10 android13-5.10 android-mainline)
+                  OUT=gki/out-5.10 ;;
+            5.15) CANDIDATES=(android13-5.15 android14-6.1 android-mainline)
+                  OUT=gki/out-5.15 ;;
+            6.1)  CANDIDATES=(android14-6.1 android-mainline)
+                  OUT=gki/out-6.1 ;;
             *) echo 'Unknown kernel_line' >&2; exit 2;;
           esac
           mkdir -p gki "$OUT"
           echo "candidates=${CANDIDATES[*]}" >> $GITHUB_OUTPUT
           echo "out=$OUT" >> $GITHUB_OUTPUT
           echo "[i] Candidate branches: ${CANDIDATES[*]}"
+
       - name: Select and clone branch
         if: steps.filter.outputs.build == '1'
         id: fetch_kernel
@@ -136,349 +163,4 @@ jobs:
           CUSTOM_URL='${{ inputs.custom_repo_url }}'
           CUSTOM_REF='${{ inputs.custom_ref }}'
           if [[ -n "$CUSTOM_URL" && -n "$CUSTOM_REF" ]]; then
-            echo "[i] Using custom repo: $CUSTOM_URL @ $CUSTOM_REF"
-            git clone --depth=1 --branch "$CUSTOM_REF" "$CUSTOM_URL" gki/custom-src
-            SELECTED="$CUSTOM_REF"; SRC_PATH="gki/custom-src"
-          else
-            SELECTED=""
-            for cand in $CANDIDATES; do
-              echo "[i] Trying branch: $cand"
-              if [[ -d gki/$cand && -f gki/$cand/Makefile ]]; then
-                SELECTED="$cand"; SRC_PATH="gki/$cand"; break
-              fi
-              rm -rf gki/tmp-clone
-              git clone --depth=1 --branch "$cand" https://android.googlesource.com/kernel/common gki/tmp-clone 2>/dev/null || continue
-              mv gki/tmp-clone gki/$cand
-              SELECTED="$cand"; SRC_PATH="gki/$cand"; break
-            done
-          fi
-          if [[ -z "$SELECTED" ]]; then
-            echo "::error ::No valid branch found ($CANDIDATES), provide custom_repo_url+custom_ref"; exit 2
-          fi
-          echo "branch=$SELECTED" >> $GITHUB_OUTPUT
-          echo "src=$SRC_PATH" >> $GITHUB_OUTPUT
-          echo "out=${{ steps.branch_select.outputs.out }}" >> $GITHUB_OUTPUT
-          echo "[i] Selected: $SELECTED -> $SRC_PATH"
-      - name: Force refresh sources (optional)
-        if: steps.filter.outputs.build == '1' && inputs.refresh_sources
-        run: |
-          SRC='${{ steps.fetch_kernel.outputs.src }}'
-          BR='${{ steps.fetch_kernel.outputs.branch }}'
-          if [[ "$SRC" == gki/custom-src ]]; then
-            echo "[i] Custom repo not auto-refreshed"
-          else
-            echo "[i] Refreshing $BR"
-            rm -rf "$SRC"
-            git clone --depth=1 --branch "$BR" https://android.googlesource.com/kernel/common "$SRC"
-          fi
-      - name: Enable debug mode
-        if: steps.filter.outputs.build == '1' && inputs.enable_debug
-        run: |
-          echo "VERBOSE_BUILD=1" >> $GITHUB_ENV
-          echo "DEBUG_MODE=1" >> $GITHUB_ENV
-          echo "[i] Debug mode enabled - verbose logs will be shown"
-      - name: Generate metadata (date+module hash)
-        if: steps.filter.outputs.build == '1'
-        id: meta
-        run: |
-          DATE_TAG=$(date +%Y%m%d)
-          MOD_HASH=$( (sha256sum extra_modules/batt_design_override/*.c 2>/dev/null; sha256sum extra_modules/batt_design_override/Makefile) | sha256sum | cut -d' ' -f1 )
-          echo "date=$DATE_TAG" >> $GITHUB_OUTPUT
-          echo "mod_hash=$MOD_HASH" >> $GITHUB_OUTPUT
-          echo "::notice title=ModuleHash::$MOD_HASH"
-      - name: Cache sources
-        if: steps.filter.outputs.build == '1' && !inputs.skip_cache
-        uses: actions/cache@v4
-        with:
-          path: ${{ steps.fetch_kernel.outputs.src }}
-          key: src-${{ steps.fetch_kernel.outputs.branch }}-${{ steps.meta.outputs.date }}-${{ inputs.skip_cache }}
-          restore-keys: |
-            src-${{ steps.fetch_kernel.outputs.branch }}-
-      - name: Cache out
-        if: steps.filter.outputs.build == '1' && !inputs.skip_cache
-        uses: actions/cache@v4
-        with:
-          path: ${{ steps.fetch_kernel.outputs.out }}
-          key: out-${{ steps.fetch_kernel.outputs.branch }}-${{ steps.meta.outputs.date }}-${{ steps.meta.outputs.mod_hash }}-${{ inputs.skip_cache }}
-          restore-keys: |
-            out-${{ steps.fetch_kernel.outputs.branch }}-${{ steps.meta.outputs.date }}-
-            out-${{ steps.fetch_kernel.outputs.branch }}-
-      - name: Cache ccache
-        if: steps.filter.outputs.build == '1' && !inputs.skip_cache
-        uses: actions/cache@v4
-        with:
-          path: .ccache
-          key: ccache-${{ steps.fetch_kernel.outputs.branch }}-${{ steps.meta.outputs.mod_hash }}-${{ inputs.skip_cache }}
-          restore-keys: |
-            ccache-${{ steps.fetch_kernel.outputs.branch }}-
-      - name: Skip cache notice
-        if: steps.filter.outputs.build == '1' && inputs.skip_cache
-        run: echo "[i] Skipping cache - full rebuild will be performed"
-      - name: Build batt module
-        if: steps.filter.outputs.build == '1' && (inputs.build_type == 'both' || inputs.build_type == 'batt_only')
-        run: |
-          set -e
-          [[ "${DEBUG_MODE:-0}" == "1" ]] && set -x
-          KERNEL_SRC='${{ steps.fetch_kernel.outputs.src }}'
-          KERNEL_OUT='${{ steps.fetch_kernel.outputs.out }}'
-          ARCH=arm64
-          CROSS_COMPILE=aarch64-linux-gnu-
-          CLANG_TRIPLE=aarch64-linux-gnu-
-          export LLVM=1 LLVM_IAS=1 ARCH CROSS_COMPILE CLANG_TRIPLE
-          echo "[dbg] ENV ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE CLANG_TRIPLE=$CLANG_TRIPLE LLVM=$LLVM LLVM_IAS=$LLVM_IAS"
-          [[ "${DEBUG_MODE:-0}" == "1" ]] && echo "[debug] Verbose build info enabled"
-          clang --version | head -n1 || true
-          if ! command -v ld.lld >/dev/null 2>&1; then echo "::error ::Missing ld.lld"; exit 2; fi
-          
-          # Generate .config
-          if [[ ! -f "$KERNEL_OUT/.config" ]]; then
-            if ! make -C "$KERNEL_SRC" O="$KERNEL_OUT" ARCH=$ARCH LLVM=1 LLVM_IAS=1 \
-              CC=clang LD=ld.lld CLANG_TRIPLE=$CLANG_TRIPLE CROSS_COMPILE=$CROSS_COMPILE \
-              LLVM_AR=llvm-ar LLVM_NM=llvm-nm LLVM_OBJCOPY=llvm-objcopy LLVM_OBJDUMP=llvm-objdump \
-              READELF=llvm-readelf STRIP=llvm-strip gki_defconfig; then
-              echo "::group::Available *gki* defconfig list"; ls "$KERNEL_SRC"/arch/arm64/configs/*gki* 2>/dev/null || true; echo "::endgroup::";
-              echo "::error ::gki_defconfig failed (branch='${{ steps.fetch_kernel.outputs.branch }}')"; exit 2; fi
-          else
-            echo "[i] Found existing .config -> olddefconfig";
-            make -C "$KERNEL_SRC" O="$KERNEL_OUT" ARCH=$ARCH LLVM=1 LLVM_IAS=1 \
-              CC=clang LD=ld.lld CLANG_TRIPLE=$CLANG_TRIPLE CROSS_COMPILE=$CROSS_COMPILE \
-              LLVM_AR=llvm-ar LLVM_NM=llvm-nm LLVM_OBJCOPY=llvm-objcopy LLVM_OBJDUMP=llvm-objdump \
-              READELF=llvm-readelf STRIP=llvm-strip olddefconfig
-          fi
-          
-          # Disable IKHEADERS (when missing cpio)
-          if ! command -v cpio >/dev/null 2>&1; then
-            echo "[i] No cpio detected, disabling CONFIG_IKHEADERS"
-            if grep -q '^CONFIG_IKHEADERS=' "$KERNEL_OUT/.config"; then
-              sed -i 's/^CONFIG_IKHEADERS=.*/# CONFIG_IKHEADERS is not set/' "$KERNEL_OUT/.config"
-            else
-              echo '# CONFIG_IKHEADERS is not set' >> "$KERNEL_OUT/.config"
-            fi
-            make -C "$KERNEL_SRC" O="$KERNEL_OUT" ARCH=$ARCH LLVM=1 LLVM_IAS=1 \
-              CC=clang LD=ld.lld CLANG_TRIPLE=$CLANG_TRIPLE CROSS_COMPILE=$CROSS_COMPILE \
-              LLVM_AR=llvm-ar LLVM_NM=llvm-nm LLVM_OBJCOPY=llvm-objcopy LLVM_OBJDUMP=llvm-objdump \
-              READELF=llvm-readelf STRIP=llvm-strip olddefconfig
-          fi
-          
-          # Disable ThinLTO for memory-constrained CI on older kernels
-          if [[ "${{ matrix.kernel_line }}" == "5.4" || "${{ matrix.kernel_line }}" == "5.10" ]]; then
-            echo "[i] Disabling ThinLTO for kernel ${{ matrix.kernel_line }} to prevent OOM"
-            if grep -q '^CONFIG_LTO_CLANG_THIN=y' "$KERNEL_OUT/.config"; then
-              sed -i 's/^CONFIG_LTO_CLANG_THIN=y/# CONFIG_LTO_CLANG_THIN is not set/' "$KERNEL_OUT/.config"
-              echo '# CONFIG_LTO_CLANG_THIN is not set' >> "$KERNEL_OUT/.config"
-              make -C "$KERNEL_SRC" O="$KERNEL_OUT" ARCH=$ARCH LLVM=1 LLVM_IAS=1 \
-                CC=clang LD=ld.lld CLANG_TRIPLE=$CLANG_TRIPLE CROSS_COMPILE=$CROSS_COMPILE \
-                LLVM_AR=llvm-ar LLVM_NM=llvm-nm LLVM_OBJCOPY=llvm-objcopy LLVM_OBJDUMP=llvm-objdump \
-                READELF=llvm-readelf STRIP=llvm-strip olddefconfig
-            fi
-          fi
-          
-          # Ensure Module.symvers exists
-          if [[ ! -f "$KERNEL_OUT/Module.symvers" ]]; then
-            echo "[i] No Module.symvers found, running make modules"
-            make -C "$KERNEL_SRC" O="$KERNEL_OUT" ARCH=$ARCH LLVM=1 LLVM_IAS=1 \
-              CC=clang LD=ld.lld CLANG_TRIPLE=$CLANG_TRIPLE CROSS_COMPILE=$CROSS_COMPILE \
-              LLVM_AR=llvm-ar LLVM_NM=llvm-nm LLVM_OBJCOPY=llvm-objcopy LLVM_OBJDUMP=llvm-objdump \
-              READELF=llvm-readelf STRIP=llvm-strip \
-              -j$(nproc) modules
-          fi
-          
-          # ThinLTO configuration (memory-aware for CI)
-          if grep -q '^CONFIG_LTO_CLANG_THIN=y' "$KERNEL_OUT/.config" 2>/dev/null; then
-            # Limit LTO jobs to prevent OOM in CI environment
-            # 5.10 and older kernels need more conservative settings
-            case "${{ matrix.kernel_line }}" in
-              5.4|5.10) LTO_JOBS=1 ;;  # Most conservative for older kernels
-              5.15) LTO_JOBS=2 ;;      # Moderate for 5.15
-              6.1|*) LTO_JOBS=4 ;;     # More aggressive for newer kernels
-            esac
-            export KBUILD_LDFLAGS="${KBUILD_LDFLAGS:-} -Wl,-plugin-opt,jobs=${LTO_JOBS}"
-            echo "[i] Detected ThinLTO -> LTO_JOBS=$LTO_JOBS (kernel=${{ matrix.kernel_line }})"
-          fi
-          
-          # Create compiler wrapper (critical fix)
-          WRAP_DIR=$(mktemp -d)
-          cat >"$WRAP_DIR/clang-wrapper" <<'EOF'
-          #!/usr/bin/env bash
-          ARGS=()
-          SEEN_TRIVIAL=0
-          for a in "$@"; do
-            if [[ "$a" == -falign-functions= ]]; then
-              continue
-            fi
-            if [[ "$a" == -ftrivial-auto-var-init=zero ]]; then
-              SEEN_TRIVIAL=1
-            fi
-            ARGS+=("$a")
-          done
-          if [[ $SEEN_TRIVIAL -eq 1 ]]; then
-            HAVE_ENABLE=0
-            for x in "${ARGS[@]}"; do
-              [[ "$x" == -enable-trivial-auto-var-init-zero-knowing-it-will-be-removed-from-clang ]] && HAVE_ENABLE=1 && break
-            done
-            if [[ $HAVE_ENABLE -eq 0 ]]; then
-              ARGS+=("-enable-trivial-auto-var-init-zero-knowing-it-will-be-removed-from-clang")
-            fi
-          else
-            ARGS+=("-enable-trivial-auto-var-init-zero-knowing-it-will-be-removed-from-clang" "-ftrivial-auto-var-init=zero")
-          fi
-          CLANG_BIN=$(command -v clang || true)
-          exec "$CLANG_BIN" "${ARGS[@]}"
-          EOF
-          chmod +x "$WRAP_DIR/clang-wrapper"
-          export CC="$WRAP_DIR/clang-wrapper"
-          export HOSTCC=clang
-          echo "[i] Enabled compiler wrapper: $CC"
-          
-          # Set KCFLAGS (important)
-          EXTRA_KCFLAGS="-Wno-macro-redefined"
-          [[ "${DEBUG_MODE:-0}" == "1" ]] && EXTRA_KCFLAGS="$EXTRA_KCFLAGS -DDEBUG"
-          
-          # Use absolute path for M
-          MOD_DIR_ABS=$(pwd)/extra_modules/batt_design_override
-          if [[ ! -f "$MOD_DIR_ABS/Makefile" ]]; then
-            echo "::error ::Module Makefile not found: $MOD_DIR_ABS/Makefile"; ls -l "$MOD_DIR_ABS" || true; exit 2
-          fi
-          echo "[i] Using external module directory: $MOD_DIR_ABS"
-          echo "[i] Build type: Battery module (batt_design_override)"
-          
-          # Build module (using local script parameters)
-          make -C "$KERNEL_SRC" O="$KERNEL_OUT" ARCH=$ARCH LLVM=1 LLVM_IAS=1 \
-            CC="$CC" HOSTCC="$HOSTCC" LD=ld.lld CLANG_TRIPLE=$CLANG_TRIPLE CROSS_COMPILE=$CROSS_COMPILE \
-            LLVM_AR=llvm-ar LLVM_NM=llvm-nm LLVM_OBJCOPY=llvm-objcopy LLVM_OBJDUMP=llvm-objdump \
-            READELF=llvm-readelf STRIP=llvm-strip KCFLAGS="$EXTRA_KCFLAGS" \
-            M="$MOD_DIR_ABS" -j$(nproc) modules
-          test -f "$MOD_DIR_ABS/batt_design_override.ko"
-          echo "[✓] Battery module build completed"
-      - name: Build chg module
-        if: steps.filter.outputs.build == '1' && (inputs.build_type == 'both' || inputs.build_type == 'chg_only')
-        run: |
-          set -e
-          [[ "${DEBUG_MODE:-0}" == "1" ]] && set -x
-          KERNEL_SRC='${{ steps.fetch_kernel.outputs.src }}'
-          KERNEL_OUT='${{ steps.fetch_kernel.outputs.out }}'
-          ARCH=arm64
-          CROSS_COMPILE=aarch64-linux-gnu-
-          CLANG_TRIPLE=aarch64-linux-gnu-
-          export LLVM=1 LLVM_IAS=1 ARCH CROSS_COMPILE CLANG_TRIPLE
-          
-          # Reuse compiler wrapper
-          WRAP_DIR=$(mktemp -d)
-          cat >"$WRAP_DIR/clang-wrapper" <<'EOF'
-          #!/usr/bin/env bash
-          ARGS=()
-          SEEN_TRIVIAL=0
-          for a in "$@"; do
-            [[ "$a" == -falign-functions= ]] && continue
-            [[ "$a" == -ftrivial-auto-var-init=zero ]] && SEEN_TRIVIAL=1
-            ARGS+=("$a")
-          done
-          if [[ $SEEN_TRIVIAL -eq 1 ]]; then
-            HAVE_ENABLE=0
-            for x in "${ARGS[@]}"; do
-              [[ "$x" == -enable-trivial-auto-var-init-zero-knowing-it-will-be-removed-from-clang ]] && HAVE_ENABLE=1 && break
-            done
-            [[ $HAVE_ENABLE -eq 0 ]] && ARGS+=("-enable-trivial-auto-var-init-zero-knowing-it-will-be-removed-from-clang")
-          else
-            ARGS+=("-enable-trivial-auto-var-init-zero-knowing-it-will-be-removed-from-clang" "-ftrivial-auto-var-init=zero")
-          fi
-          CLANG_BIN=$(command -v clang || true)
-          exec "$CLANG_BIN" "${ARGS[@]}"
-          EOF
-          chmod +x "$WRAP_DIR/clang-wrapper"
-          export CC="$WRAP_DIR/clang-wrapper"
-          export HOSTCC=clang
-          
-          EXTRA_KCFLAGS="-Wno-macro-redefined"
-          [[ "${DEBUG_MODE:-0}" == "1" ]] && EXTRA_KCFLAGS="$EXTRA_KCFLAGS -DDEBUG"
-          MOD_DIR_ABS=$(pwd)/extra_modules/chg_param_override
-          if [[ ! -f "$MOD_DIR_ABS/Makefile" ]]; then
-            echo "::error ::Module Makefile not found: $MOD_DIR_ABS/Makefile"; exit 2
-          fi
-          echo "[i] Using external module directory: $MOD_DIR_ABS"
-          echo "[i] Build type: Charging module (chg_param_override)"
-          make -C "$KERNEL_SRC" O="$KERNEL_OUT" ARCH=$ARCH LLVM=1 LLVM_IAS=1 \
-            CC="$CC" HOSTCC="$HOSTCC" LD=ld.lld CLANG_TRIPLE=$CLANG_TRIPLE CROSS_COMPILE=$CROSS_COMPILE \
-            LLVM_AR=llvm-ar LLVM_NM=llvm-nm LLVM_OBJCOPY=llvm-objcopy LLVM_OBJDUMP=llvm-objdump \
-            READELF=llvm-readelf STRIP=llvm-strip KCFLAGS="$EXTRA_KCFLAGS" \
-            M="$MOD_DIR_ABS" -j$(nproc) modules
-          test -f "$MOD_DIR_ABS/chg_param_override.ko"
-          echo "[✓] Charging module build completed"
-      - name: Parse version number
-        if: steps.filter.outputs.build == '1'
-        id: ver
-        run: |
-          BASE_VER=$(grep -E '^version=' packaging/magisk-batt-design-override/module.prop | cut -d= -f2-)
-          if [[ -n "${{ inputs.version }}" ]]; then
-            VER='${{ inputs.version }}'
-          else
-            VER="$BASE_VER"
-          fi
-          echo VERSION=$VER >> $GITHUB_ENV
-          echo "version=$VER" >> $GITHUB_OUTPUT
-      - name: Package Magisk module
-        if: steps.filter.outputs.build == '1'
-        run: |
-          mkdir -p dist
-          mkdir -p packaging/magisk-batt-design-override/common
-          cp -f extra_modules/batt_design_override/batt_design_override.ko packaging/magisk-batt-design-override/common/ || true
-          cp -f extra_modules/chg_param_override/chg_param_override.ko packaging/magisk-batt-design-override/common/ || true
-          bash packaging/build_magisk_zip.sh \
-            --ko extra_modules/batt_design_override/batt_design_override.ko \
-            --kernel-line ${{ matrix.kernel_line }} \
-            --version $VERSION \
-            --output dist
-          ls -l dist
-      - name: Prepare release files
-        if: steps.filter.outputs.build == '1'
-        run: |
-          set -e
-          ANDROID_TAG='${{ steps.fetch_kernel.outputs.branch }}'
-          mkdir -p release_out
-          if [ -f extra_modules/batt_design_override/batt_design_override.ko ]; then
-            cp -f extra_modules/batt_design_override/batt_design_override.ko "release_out/batt_design_override-${ANDROID_TAG}.ko"
-          fi
-          if [ -f extra_modules/chg_param_override/chg_param_override.ko ]; then
-            cp -f extra_modules/chg_param_override/chg_param_override.ko "release_out/chg_param_override-${ANDROID_TAG}.ko"
-          fi
-          if [ -f packaging/magisk-batt-design-override/common/battcaplsp.apk ]; then
-            if [ "${{ matrix.kernel_line }}" = "5.15" ]; then
-              cp -f packaging/magisk-batt-design-override/common/battcaplsp.apk "release_out/battcaplsp.apk"
-            fi
-          fi
-      - name: Upload artifacts
-        if: steps.filter.outputs.build == '1' && inputs.upload_artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: batt-design-override-${{ matrix.kernel_line }}-${{ inputs.build_type }}
-          path: |
-            release_out/*
-            dist/*.zip
-          if-no-files-found: error
-
-  release:
-    needs: build
-    if: inputs.release
-    runs-on: ubuntu-22.04
-    permissions:
-      contents: write
-    steps:
-      - name: Download artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: collected
-      - name: Generate notes
-        run: |
-          echo "Release battmod-$(date +%Y%m%d-%H%M%S)" > NOTES.md
-          find collected -name '*.zip' -printf '* %f\n' >> NOTES.md || true
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ needs.build.outputs.version }}
-          name: ${{ needs.build.outputs.version }}
-          body_path: NOTES.md
-          files: |
-            collected/**/dist/*.zip
-            collected/**/release_out/*
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+            echo "[i] Using custom repo: $
