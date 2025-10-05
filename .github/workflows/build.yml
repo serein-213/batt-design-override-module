@@ -4,29 +4,62 @@ on:
   workflow_dispatch:
     inputs:
       kernel_lines:
-        description: '内核主线列表: 5.4,5.10,5.15,6.1 (空=全部)'
-        required: false
-        default: ''
+        description: '内核版本选择'
+        type: choice
+        required: true
+        default: '6.1'
+        options:
+          - '6.1'
+          - '5.15'
+          - '5.10'
+          - '5.4'
+          - '5.4,5.10,5.15,6.1'
+      build_type:
+        description: '构建类型'
+        type: choice
+        required: true
+        default: 'both'
+        options:
+          - 'both'
+          - 'batt_only'
+          - 'chg_only'
       version:
-        description: '模块版本号 (空=module.prop)'
+        description: '模块版本号 (空=自动生成)'
         required: false
         default: ''
       release:
-        description: '发布 Release (true/false)'
+        description: '发布 Release'
+        type: boolean
         required: false
-        default: 'false'
+        default: false
       refresh_sources:
-        description: '强制刷新 GKI 源码缓存 (true/false)'
+        description: '强制刷新 GKI 源码缓存'
+        type: boolean
         required: false
-        default: 'false'
+        default: false
+      enable_debug:
+        description: '启用调试模式 (详细日志)'
+        type: boolean
+        required: false
+        default: false
       custom_repo_url:
-        description: '自定义内核源码仓库 (可选, 例如 https://github.com/xxx/kernel.git)'
+        description: '自定义内核源码仓库 (可选)'
         required: false
         default: ''
       custom_ref:
-        description: '自定义仓库分支/标签 (与 custom_repo_url 搭配)'
+        description: '自定义仓库分支/标签'
         required: false
         default: ''
+      upload_artifacts:
+        description: '上传构建产物'
+        type: boolean
+        required: false
+        default: true
+      skip_cache:
+        description: '跳过缓存 (强制重新构建)'
+        type: boolean
+        required: false
+        default: false
 
 jobs:
   build:
@@ -52,11 +85,18 @@ jobs:
         id: filter
         run: |
           REQ='${{ github.event.inputs.kernel_lines }}'
-          if [[ -z "$REQ" ]]; then B=1; else
+          if [[ -z "$REQ" || "$REQ" == "5.4,5.10,5.15,6.1" ]]; then 
+            B=1
+          else
             WANT=$(echo "$REQ" | tr ' ' ',' | sed 's/,,*/,/g' | sed 's/^,//;s/,$//')
-            IFS=',' read -r -a ARR <<< "$WANT"; B=0; for k in "${ARR[@]}"; do [[ "$k" == "${{ matrix.kernel_line }}" ]] && B=1; done
+            IFS=',' read -r -a ARR <<< "$WANT"
+            B=0
+            for k in "${ARR[@]}"; do 
+              [[ "$k" == "${{ matrix.kernel_line }}" ]] && B=1 && break
+            done
           fi
           echo "build=$B" >> $GITHUB_OUTPUT
+          echo "[i] 内核版本 ${{ matrix.kernel_line }}: $([ $B -eq 1 ] && echo '构建' || echo '跳过')"
       - name: 跳过标记
         if: steps.filter.outputs.build != '1'
         run: echo "Skip ${{ matrix.kernel_line }}"
@@ -132,6 +172,12 @@ jobs:
             rm -rf "$SRC"
             git clone --depth=1 --branch "$BR" https://android.googlesource.com/kernel/common "$SRC"
           fi
+      - name: 启用调试模式
+        if: steps.filter.outputs.build == '1' && github.event.inputs.enable_debug == 'true'
+        run: |
+          echo "VERBOSE_BUILD=1" >> $GITHUB_ENV
+          echo "DEBUG_MODE=1" >> $GITHUB_ENV
+          echo "[i] 调试模式已启用 - 将显示详细日志"
       - name: 生成元数据 (日期+模块哈希)
         if: steps.filter.outputs.build == '1'
         id: meta
@@ -142,34 +188,38 @@ jobs:
           echo "mod_hash=$MOD_HASH" >> $GITHUB_OUTPUT
           echo "::notice title=ModuleHash::$MOD_HASH"
       - name: 缓存源码
-        if: steps.filter.outputs.build == '1'
+        if: steps.filter.outputs.build == '1' && github.event.inputs.skip_cache != 'true'
         uses: actions/cache@v4
         with:
           path: ${{ steps.fetch_kernel.outputs.src }}
-          key: src-${{ steps.fetch_kernel.outputs.branch }}-${{ steps.meta.outputs.date }}
+          key: src-${{ steps.fetch_kernel.outputs.branch }}-${{ steps.meta.outputs.date }}-${{ github.event.inputs.skip_cache }}
           restore-keys: |
             src-${{ steps.fetch_kernel.outputs.branch }}-
       - name: 缓存 out
-        if: steps.filter.outputs.build == '1'
+        if: steps.filter.outputs.build == '1' && github.event.inputs.skip_cache != 'true'
         uses: actions/cache@v4
         with:
           path: ${{ steps.fetch_kernel.outputs.out }}
-          key: out-${{ steps.fetch_kernel.outputs.branch }}-${{ steps.meta.outputs.date }}-${{ steps.meta.outputs.mod_hash }}
+          key: out-${{ steps.fetch_kernel.outputs.branch }}-${{ steps.meta.outputs.date }}-${{ steps.meta.outputs.mod_hash }}-${{ github.event.inputs.skip_cache }}
           restore-keys: |
             out-${{ steps.fetch_kernel.outputs.branch }}-${{ steps.meta.outputs.date }}-
             out-${{ steps.fetch_kernel.outputs.branch }}-
       - name: 缓存 ccache
-        if: steps.filter.outputs.build == '1'
+        if: steps.filter.outputs.build == '1' && github.event.inputs.skip_cache != 'true'
         uses: actions/cache@v4
         with:
           path: .ccache
-          key: ccache-${{ steps.fetch_kernel.outputs.branch }}-${{ steps.meta.outputs.mod_hash }}
+          key: ccache-${{ steps.fetch_kernel.outputs.branch }}-${{ steps.meta.outputs.mod_hash }}-${{ github.event.inputs.skip_cache }}
           restore-keys: |
             ccache-${{ steps.fetch_kernel.outputs.branch }}-
+      - name: 跳过缓存提示
+        if: steps.filter.outputs.build == '1' && github.event.inputs.skip_cache == 'true'
+        run: echo "[i] 跳过缓存 - 将进行完全重新构建"
       - name: 构建模块
-        if: steps.filter.outputs.build == '1'
+        if: steps.filter.outputs.build == '1' && (github.event.inputs.build_type == 'both' || github.event.inputs.build_type == 'batt_only')
         run: |
           set -e
+          [[ "${DEBUG_MODE:-0}" == "1" ]] && set -x
           KERNEL_SRC='${{ steps.fetch_kernel.outputs.src }}'
           KERNEL_OUT='${{ steps.fetch_kernel.outputs.out }}'
           ARCH=arm64
@@ -177,6 +227,7 @@ jobs:
           CLANG_TRIPLE=aarch64-linux-gnu-
           export LLVM=1 LLVM_IAS=1 ARCH CROSS_COMPILE CLANG_TRIPLE
           echo "[dbg] ENV ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE CLANG_TRIPLE=$CLANG_TRIPLE LLVM=$LLVM LLVM_IAS=$LLVM_IAS"
+          [[ "${DEBUG_MODE:-0}" == "1" ]] && echo "[debug] 详细构建信息已启用"
           clang --version | head -n1 || true
           if ! command -v ld.lld >/dev/null 2>&1; then echo "::error ::缺少 ld.lld"; exit 2; fi
           
@@ -265,6 +316,7 @@ EOF
           
           # 设置 KCFLAGS (重要)
           EXTRA_KCFLAGS="-Wno-macro-redefined"
+          [[ "${DEBUG_MODE:-0}" == "1" ]] && EXTRA_KCFLAGS="$EXTRA_KCFLAGS -DDEBUG"
           
           # 使用绝对路径的 M
           MOD_DIR_ABS=$(pwd)/extra_modules/batt_design_override
@@ -272,6 +324,7 @@ EOF
             echo "::error ::模块 Makefile 不存在: $MOD_DIR_ABS/Makefile"; ls -l "$MOD_DIR_ABS" || true; exit 2
           fi
           echo "[i] 使用外部模块目录: $MOD_DIR_ABS"
+          echo "[i] 构建类型: 电池模块 (batt_design_override)"
           
           # 构建模块 (使用本地脚本的参数)
           make -C "$KERNEL_SRC" O="$KERNEL_OUT" ARCH=$ARCH LLVM=1 LLVM_IAS=1 \
@@ -280,10 +333,12 @@ EOF
             READELF=llvm-readelf STRIP=llvm-strip KCFLAGS="$EXTRA_KCFLAGS" \
             M="$MOD_DIR_ABS" -j$(nproc) modules
           test -f "$MOD_DIR_ABS/batt_design_override.ko"
+          echo "[✓] 电池模块构建完成"
       - name: 构建 chg 模块
-        if: steps.filter.outputs.build == '1'
+        if: steps.filter.outputs.build == '1' && (github.event.inputs.build_type == 'both' || github.event.inputs.build_type == 'chg_only')
         run: |
           set -e
+          [[ "${DEBUG_MODE:-0}" == "1" ]] && set -x
           KERNEL_SRC='${{ steps.fetch_kernel.outputs.src }}'
           KERNEL_OUT='${{ steps.fetch_kernel.outputs.out }}'
           ARCH=arm64
@@ -319,17 +374,20 @@ EOF
           export HOSTCC=clang
           
           EXTRA_KCFLAGS="-Wno-macro-redefined"
+          [[ "${DEBUG_MODE:-0}" == "1" ]] && EXTRA_KCFLAGS="$EXTRA_KCFLAGS -DDEBUG"
           MOD_DIR_ABS=$(pwd)/extra_modules/chg_param_override
           if [[ ! -f "$MOD_DIR_ABS/Makefile" ]]; then
             echo "::error ::模块 Makefile 不存在: $MOD_DIR_ABS/Makefile"; exit 2
           fi
           echo "[i] 使用外部模块目录: $MOD_DIR_ABS"
+          echo "[i] 构建类型: 充电模块 (chg_param_override)"
           make -C "$KERNEL_SRC" O="$KERNEL_OUT" ARCH=$ARCH LLVM=1 LLVM_IAS=1 \
             CC="$CC" HOSTCC="$HOSTCC" LD=ld.lld CLANG_TRIPLE=$CLANG_TRIPLE CROSS_COMPILE=$CROSS_COMPILE \
             LLVM_AR=llvm-ar LLVM_NM=llvm-nm LLVM_OBJCOPY=llvm-objcopy LLVM_OBJDUMP=llvm-objdump \
             READELF=llvm-readelf STRIP=llvm-strip KCFLAGS="$EXTRA_KCFLAGS" \
             M="$MOD_DIR_ABS" -j$(nproc) modules
           test -f "$MOD_DIR_ABS/chg_param_override.ko"
+          echo "[✓] 充电模块构建完成"
       - name: 解析版本号
         if: steps.filter.outputs.build == '1'
         id: ver
@@ -375,10 +433,10 @@ EOF
             fi
           fi
       - name: 上传构件
-        if: steps.filter.outputs.build == '1'
+        if: steps.filter.outputs.build == '1' && github.event.inputs.upload_artifacts == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: batt-design-override-${{ matrix.kernel_line }}
+          name: batt-design-override-${{ matrix.kernel_line }}-${{ github.event.inputs.build_type }}
           path: |
             release_out/*
             dist/*.zip
@@ -386,8 +444,7 @@ EOF
 
   release:
     needs: build
-    if: >-
-      (github.event_name == 'workflow_dispatch' && inputs.release == 'true')
+    if: github.event.inputs.release == true
     runs-on: ubuntu-22.04
     permissions:
       contents: write
