@@ -1,6 +1,6 @@
 name: Build batt_design_override (Auto GKI Fetch)
 
-"on":
+on:
   workflow_dispatch:
     inputs:
       kernel_lines:
@@ -14,7 +14,6 @@ name: Build batt_design_override (Auto GKI Fetch)
           - '5.10'
           - '5.4'
           - '5.4,5.10,5.15,6.1'
-
       build_type:
         description: 'Build type'
         type: choice
@@ -24,46 +23,38 @@ name: Build batt_design_override (Auto GKI Fetch)
           - 'both'
           - 'batt_only'
           - 'chg_only'
-
       version:
         description: 'Module version (empty=auto)'
         required: false
         default: ''
-
       release:
         description: 'Create Release'
         type: boolean
         required: false
         default: false
-
       refresh_sources:
         description: 'Force refresh GKI source cache'
         type: boolean
         required: false
         default: false
-
       enable_debug:
         description: 'Enable debug mode (verbose logs)'
         type: boolean
         required: false
         default: false
-
       custom_repo_url:
         description: 'Custom kernel source repo (optional)'
         required: false
         default: ''
-
       custom_ref:
         description: 'Custom repo branch/tag'
         required: false
         default: ''
-
       upload_artifacts:
         description: 'Upload build artifacts'
         type: boolean
         required: false
         default: true
-
       skip_cache:
         description: 'Skip cache (force rebuild)'
         type: boolean
@@ -75,12 +66,10 @@ jobs:
     runs-on: ubuntu-22.04
     outputs:
       version: ${{ steps.ver.outputs.version }}
-
     strategy:
       fail-fast: false
       matrix:
         kernel_line: ["5.4", "5.10", "5.15", "6.1"]
-
     env:
       MODULE_ID: batt-design-override
       MAGISK_DIR: packaging/magisk-batt-design-override
@@ -90,10 +79,8 @@ jobs:
       LLVM_IAS: 1
       JOBS: 8
       LTO_JOBS: 8
-
     steps:
       - uses: actions/checkout@v4
-
       - name: Filter required kernels
         id: filter
         run: |
@@ -110,50 +97,36 @@ jobs:
           fi
           echo "build=$B" >> $GITHUB_OUTPUT
           echo "[i] Kernel ${{ matrix.kernel_line }}: $([ $B -eq 1 ] && echo 'BUILD' || echo 'SKIP')"
-
       - name: Skip marker
         if: steps.filter.outputs.build != '1'
         run: echo "Skip ${{ matrix.kernel_line }}"
-
       - name: Install dependencies
         if: steps.filter.outputs.build == '1'
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            cpio libelf-dev bc flex bison python3 rsync \
-            build-essential zip unzip file jq git \
-            lld clang llvm llvm-dev llvm-runtime
+          sudo apt-get install -y --no-install-recommends cpio libelf-dev bc flex bison python3 rsync build-essential zip unzip file jq git lld clang llvm llvm-dev llvm-runtime
           echo "[i] Host clang:"; clang --version || true
           echo "[i] Host ld.lld path:"; command -v ld.lld || true
           if ! command -v ld.lld >/dev/null 2>&1; then
             FOUND=$(command -v /usr/lib/llvm-*/bin/ld.lld 2>/dev/null | head -n1 || true)
-            [[ -n "$FOUND" ]] && sudo ln -sf "$FOUND" /usr/local/bin/ld.lld
+            if [[ -n "$FOUND" ]]; then sudo ln -sf "$FOUND" /usr/local/bin/ld.lld; fi
           fi
-          if ! command -v ld.lld >/dev/null 2>&1; then
-            echo "::error ::Still missing ld.lld"
-            exit 2
-          fi
-
+          if ! command -v ld.lld >/dev/null 2>&1; then echo "::error ::Still missing ld.lld"; exit 2; fi
       - name: Branch selection preparation
         if: steps.filter.outputs.build == '1'
         id: branch_select
         run: |
           case "${{ matrix.kernel_line }}" in
-            5.4)  CANDIDATES=(android11-5.4 android12-5.10 android-mainline)
-                  OUT=gki/out-5.4 ;;
-            5.10) CANDIDATES=(android12-5.10 android13-5.10 android-mainline)
-                  OUT=gki/out-5.10 ;;
-            5.15) CANDIDATES=(android13-5.15 android14-6.1 android-mainline)
-                  OUT=gki/out-5.15 ;;
-            6.1)  CANDIDATES=(android14-6.1 android-mainline)
-                  OUT=gki/out-6.1 ;;
+            5.4)  CANDIDATES=(android11-5.4 android12-5.10 android-mainline); OUT=gki/out-5.4 ;;
+            5.10) CANDIDATES=(android12-5.10 android13-5.10 android-mainline); OUT=gki/out-5.10 ;;
+            5.15) CANDIDATES=(android13-5.15 android14-6.1 android-mainline); OUT=gki/out-5.15 ;;
+            6.1)  CANDIDATES=(android14-6.1 android-mainline); OUT=gki/out-6.1 ;;
             *) echo 'Unknown kernel_line' >&2; exit 2;;
           esac
           mkdir -p gki "$OUT"
           echo "candidates=${CANDIDATES[*]}" >> $GITHUB_OUTPUT
           echo "out=$OUT" >> $GITHUB_OUTPUT
           echo "[i] Candidate branches: ${CANDIDATES[*]}"
-
       - name: Select and clone branch
         if: steps.filter.outputs.build == '1'
         id: fetch_kernel
@@ -163,4 +136,204 @@ jobs:
           CUSTOM_URL='${{ inputs.custom_repo_url }}'
           CUSTOM_REF='${{ inputs.custom_ref }}'
           if [[ -n "$CUSTOM_URL" && -n "$CUSTOM_REF" ]]; then
-            echo "[i] Using custom repo: $
+            echo "[i] Using custom repo: $CUSTOM_URL @ $CUSTOM_REF"
+            # Perform a full clone instead of a shallow one to ensure all files are present
+            git clone --branch "$CUSTOM_REF" "$CUSTOM_URL" gki/custom-src
+            SELECTED="$CUSTOM_REF"; SRC="gki/custom-src"
+            echo "src_dir=$SRC" >> $GITHUB_OUTPUT
+            echo "[i] Cloned to $SRC"
+          else
+            echo "[i] Using AOSP GKI repo"
+            if ${{ inputs.refresh_sources }}; then rm -rf gki/src; fi
+            if [[ ! -d gki/src ]]; then
+                echo "[i] Cloning GKI sources..."
+                git clone --no-tags --single-branch --no-checkout https://android.googlesource.com/kernel/common gki/src
+            else
+                echo "[i] Re-using existing GKI sources"
+            fi
+            cd gki/src
+            git fetch --all --tags
+            cd ../..
+            SELECTED=""
+            for b in $CANDIDATES; do
+                if git -C gki/src show-ref --quiet "refs/remotes/origin/$b"; then
+                    SELECTED="$b"; break
+                fi
+            done
+            if [[ -z "$SELECTED" ]]; then echo "::error ::No suitable branch found"; exit 2; fi
+            SRC="gki/src"
+          fi
+          echo "selected_branch=$SELECTED" >> $GITHUB_OUTPUT
+          echo "src_dir=$SRC" >> $GITHUB_OUTPUT
+          echo "[i] Selected branch: $SELECTED"
+          echo "[i] Source dir: $SRC"
+      - name: Initialize submodules
+        if: steps.filter.outputs.build == '1' && steps.fetch_kernel.outcome == 'success'
+        run: |
+          SRC_DIR="${{ steps.fetch_kernel.outputs.src_dir }}"
+          if [[ -n "$SRC_DIR" && -d "$SRC_DIR" ]]; then
+            echo "[i] Initializing submodules in $SRC_DIR..."
+            git -C "$SRC_DIR" submodule update --init --recursive
+          else
+            echo "[i] Skipping submodule initialization as source directory is not set or does not exist."
+          fi
+      - name: Get module version
+        if: steps.filter.outputs.build == '1'
+        id: ver
+        run: |
+          set -e
+          if [[ -n '${{ inputs.version }}' ]]; then
+            VER='${{ inputs.version }}'
+          else
+            VER=$(grep 'VERSION_CODE' $MAGISK_DIR/module.prop | cut -d'=' -f2)
+            VER="$VER-$(date +%Y%m%d%H%M)-$(git rev-parse --short HEAD)"
+          fi
+          echo "version=$VER" >> $GITHUB_OUTPUT
+          echo "[i] Module version: $VER"
+      - name: Restore ccache
+        if: steps.filter.outputs.build == '1' && !inputs.skip_cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-${{ matrix.kernel_line }}-${{ github.sha }}
+          restore-keys: ccache-${{ matrix.kernel_line }}-
+      - name: Setup ccache
+        if: steps.filter.outputs.build == '1'
+        run: |
+          export PATH="/usr/lib/ccache:$PATH"
+          ccache -s || true
+          ccache -z || true
+      - name: Build module
+        if: steps.filter.outputs.build == '1'
+        id: build_module
+        run: |
+          set -e
+          export PATH="/usr/lib/ccache:$PATH"
+          SRC_DIR=${{ steps.fetch_kernel.outputs.src_dir }}
+          BRANCH=${{ steps.fetch_kernel.outputs.selected_branch }}
+          OUT_DIR=${{ steps.branch_select.outputs.out }}
+          BUILD_TYPE=${{ inputs.build_type }}
+          DEBUG_MODE=${{ inputs.enable_debug }}
+          
+          if [[ "$DEBUG_MODE" == "true" ]]; then
+            export V=1
+          fi
+
+          if [[ "$BUILD_TYPE" == "both" || "$BUILD_TYPE" == "batt_only" ]]; then
+            echo "[i] Building batt-design-override for kernel ${{ matrix.kernel_line }}"
+            make -C "$SRC_DIR" O="$OUT_DIR" M=$(pwd) KBRANCH="$BRANCH" batt-design-override
+            mkdir -p "dist/batt/${{ matrix.kernel_line }}"
+            cp batt-design-override.ko "dist/batt/${{ matrix.kernel_line }}/"
+          fi
+          
+          if [[ "$BUILD_TYPE" == "both" || "$BUILD_TYPE" == "chg_only" ]]; then
+            echo "[i] Building chg-design-override for kernel ${{ matrix.kernel_line }}"
+            make -C "$SRC_DIR" O="$OUT_DIR" M=$(pwd) KBRANCH="$BRANCH" chg-design-override
+            mkdir -p "dist/chg/${{ matrix.kernel_line }}"
+            cp chg-design-override.ko "dist/chg/${{ matrix.kernel_line }}/"
+          fi
+      - name: Save ccache
+        if: steps.filter.outputs.build == '1' && !inputs.skip_cache && steps.build_module.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-${{ matrix.kernel_line }}-${{ github.sha }}
+      - name: Show ccache stats
+        if: steps.filter.outputs.build == '1'
+        run: |
+          export PATH="/usr/lib/ccache:$PATH"
+          ccache -s || true
+      - name: Upload artifacts
+        if: steps.filter.outputs.build == '1' && steps.build_module.outcome == 'success' && inputs.upload_artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-modules-${{ matrix.kernel_line }}
+          path: dist/*/${{ matrix.kernel_line }}/*.ko
+
+  package_and_release:
+    needs: build
+    if: success() && (inputs.release || inputs.upload_artifacts)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+      - name: Prepare packaging
+        id: prep
+        run: |
+          set -e
+          VERSION=${{ needs.build.outputs.version }}
+          if [[ -z "$VERSION" ]]; then
+            echo "::error ::Version is missing from build job"
+            exit 1
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          
+          # Prepare Magisk module structure
+          BUILD_TYPE=${{ inputs.build_type }}
+          if [[ "$BUILD_TYPE" == "both" || "$BUILD_TYPE" == "batt_only" ]]; then
+            mkdir -p "packaging/magisk-batt/system/lib/modules"
+            cp -r packaging/magisk-batt-design-override/* packaging/magisk-batt/
+            sed -i "s/^versionCode=.*/versionCode=$(date +%Y%m%d)/" packaging/magisk-batt/module.prop
+            sed -i "s/^version=.*/version=$VERSION/" packaging/magisk-batt/module.prop
+          fi
+          if [[ "$BUILD_TYPE" == "both" || "$BUILD_TYPE" == "chg_only" ]]; then
+            mkdir -p "packaging/magisk-chg/system/lib/modules"
+            cp -r packaging/magisk-chg-design-override/* packaging/magisk-chg/
+            sed -i "s/^versionCode=.*/versionCode=$(date +%Y%m%d)/" packaging/magisk-chg/module.prop
+            sed -i "s/^version=.*/version=$VERSION/" packaging/magisk-chg/module.prop
+          fi
+      - name: Package modules
+        run: |
+          set -e
+          find artifacts -type f -name "*.ko"
+          
+          for ko_file in $(find artifacts -type f -name "*.ko"); do
+            DIR_NAME=$(basename $(dirname "$ko_file"))
+            MODULE_TYPE=$(basename $(dirname $(dirname "$ko_file")))
+            
+            if [[ "$MODULE_TYPE" == "batt" ]]; then
+              TARGET_DIR="packaging/magisk-batt/system/lib/modules"
+            elif [[ "$MODULE_TYPE" == "chg" ]]; then
+              TARGET_DIR="packaging/magisk-chg/system/lib/modules"
+            else
+              continue
+            fi
+            
+            mkdir -p "$TARGET_DIR/$DIR_NAME"
+            cp "$ko_file" "$TARGET_DIR/$DIR_NAME/"
+          done
+          
+          # Create zip files
+          BUILD_TYPE=${{ inputs.build_type }}
+          if [[ "$BUILD_TYPE" == "both" || "$BUILD_TYPE" == "batt_only" ]]; then
+            cd packaging/magisk-batt
+            zip -r9 ../../batt-design-override-v${{ steps.prep.outputs.version }}.zip .
+            cd ../..
+          fi
+          if [[ "$BUILD_TYPE" == "both" || "$BUILD_TYPE" == "chg_only" ]]; then
+            cd packaging/magisk-chg
+            zip -r9 ../../chg-design-override-v${{ steps.prep.outputs.version }}.zip .
+            cd ../..
+          fi
+      - name: Upload Magisk modules
+        if: inputs.upload_artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: magisk-modules
+          path: ./*.zip
+      - name: Create Release
+        if: inputs.release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ./*.zip
+          tag_name: v${{ steps.prep.outputs.version }}
+          name: Release v${{ steps.prep.outputs.version }}
+          body: |
+            Automated release with pre-built kernel modules.
+            - Kernel versions: ${{ inputs.kernel_lines }}
+            - Build type: ${{ inputs.build_type }}
+          draft: false
+          prerelease: false
