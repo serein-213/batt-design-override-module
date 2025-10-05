@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<xposed-init>
+    <package>com.android.settings</package>
+    <hook class="com.override.battcaplsp.SettingsHook" />
+    <description>Override device_params_pref basic_info_key capacity</description>
+    <min-version>82</min-version>
+    <name>BattCapLSP</name>
+    <version>1.0</version>
+</xposed-init>

@@ -1,0 +1,25 @@
+# Android/Gradle build outputs
+.gradle/
+build/
+*/build/
+
+# IDE
+.idea/
+*.iml
+
+# Local config
+local.properties
+
+# Keystores (if any)
+*.jks
+*.keystore
+
+# Generated artifacts
+*.apk
+*.aab
+*.zip
+
+# Logs
+*.log
+
+

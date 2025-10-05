@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- LSPosed recommended scopes: packages the module is intended to work with -->
+    <string-array name="xposed_scope">
+        <!-- Settings app (recommended minimal scope) -->
+        <item>com.android.settings</item>
+    </string-array>
+</resources>

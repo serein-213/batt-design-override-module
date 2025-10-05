@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Battery Override Manager</string>
+    <string name="module_settings_title">模块设置</string>
+    <string name="root_permission_check">Root 权限检查</string>
+    <string name="root_available">Root 权限已获取</string>
+    <string name="root_unavailable">Root 权限未获取</string>
+    <string name="module_loaded">模块已加载</string>
+    <string name="module_not_loaded">模块未加载</string>
+    <string name="refresh_status">刷新状态</string>
+    <string name="open_full_settings">打开完整设置界面</string>
+</resources>
