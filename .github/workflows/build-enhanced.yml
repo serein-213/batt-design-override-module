@@ -1,0 +1,279 @@
+name: Build Enhanced (with Local Scripts)
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_lines:
+        description: '内核版本: 5.4,5.10,5.15,6.1,6.6 (空=全部)'
+        required: false
+        default: ''
+      version:
+        description: '模块版本号'
+        required: false
+        default: ''
+      release:
+        description: '发布 Release'
+        required: false
+        default: 'false'
+      use_local_scripts:
+        description: '使用本地构建脚本 (更可靠)'
+        required: false
+        default: 'true'
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+    strategy:
+      fail-fast: false
+      matrix:
+        kernel_line: ["5.4", "5.10", "5.15", "6.1", "6.6"]
+    env:
+      MODULE_ID: batt-design-override
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      ARCH: arm64
+      LLVM: 1
+      LLVM_IAS: 1
+      JOBS: 8
+      LTO_JOBS: 8
+      PATCH_FLAGS: 1
+      AUTO_NEW_OUT: 1
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: 过滤所需内核
+        id: filter
+        run: |
+          REQ='${{ github.event.inputs.kernel_lines }}'
+          if [[ -z "$REQ" ]]; then B=1; else
+            WANT=$(echo "$REQ" | tr ' ' ',' | sed 's/,,*/,/g' | sed 's/^,//;s/,$//')
+            IFS=',' read -r -a ARR <<< "$WANT"; B=0; for k in "${ARR[@]}"; do [[ "$k" == "${{ matrix.kernel_line }}" ]] && B=1; done
+          fi
+          echo "build=$B" >> $GITHUB_OUTPUT
+
+      - name: 跳过标记
+        if: steps.filter.outputs.build != '1'
+        run: echo "Skip ${{ matrix.kernel_line }}"
+
+      - name: 安装依赖
+        if: steps.filter.outputs.build == '1'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cpio libelf-dev bc flex bison python3 rsync build-essential \
+            zip unzip file jq git lld clang llvm llvm-dev llvm-runtime \
+            ccache
+          
+          # 确保 ld.lld 可用
+          if ! command -v ld.lld >/dev/null 2>&1; then
+            FOUND=$(find /usr -name "ld.lld" 2>/dev/null | head -n1)
+            if [[ -n "$FOUND" ]]; then 
+              sudo ln -sf "$FOUND" /usr/local/bin/ld.lld
+            fi
+          fi
+          
+          echo "[i] 工具链版本:"
+          clang --version | head -n1
+          ld.lld --version | head -n1
+
+      - name: 设置构建脚本
+        if: steps.filter.outputs.build == '1'
+        id: setup_scripts
+        run: |
+          # 检查是否使用本地构建脚本
+          USE_LOCAL='${{ github.event.inputs.use_local_scripts }}'
+          if [[ "$USE_LOCAL" == "true" && -f "scripts/build_batt_module_${{ matrix.kernel_line }}.sh" ]]; then
+            echo "method=local_script" >> $GITHUB_OUTPUT
+            echo "script=scripts/build_batt_module_${{ matrix.kernel_line }}.sh" >> $GITHUB_OUTPUT
+            echo "[i] 使用本地构建脚本: scripts/build_batt_module_${{ matrix.kernel_line }}.sh"
+          else
+            echo "method=manual" >> $GITHUB_OUTPUT
+            echo "[i] 使用手动构建方法"
+          fi
+
+      - name: 获取内核源码
+        if: steps.filter.outputs.build == '1'
+        id: fetch_kernel
+        run: |
+          case "${{ matrix.kernel_line }}" in
+            5.4)  BRANCH="android11-5.4"; OUT="gki/out-5.4" ;;
+            5.10) BRANCH="android12-5.10"; OUT="gki/out-5.10" ;;
+            5.15) BRANCH="android13-5.15"; OUT="gki/out-5.15" ;;
+            6.1)  BRANCH="android14-6.1"; OUT="gki/out-6.1" ;;
+            6.6)  BRANCH="android-mainline"; OUT="gki/out-6.6" ;;
+            *) echo "未知内核版本" >&2; exit 1;;
+          esac
+          
+          SRC_DIR="gki/common-$BRANCH"
+          mkdir -p gki "$OUT"
+          
+          if [[ ! -d "$SRC_DIR" ]]; then
+            echo "[i] 克隆内核源码: $BRANCH"
+            git clone --depth=1 --branch "$BRANCH" \
+              https://android.googlesource.com/kernel/common "$SRC_DIR"
+          fi
+          
+          echo "src=$SRC_DIR" >> $GITHUB_OUTPUT
+          echo "out=$OUT" >> $GITHUB_OUTPUT
+          echo "branch=$BRANCH" >> $GITHUB_OUTPUT
+
+      - name: 缓存设置
+        if: steps.filter.outputs.build == '1'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ steps.fetch_kernel.outputs.src }}
+            ${{ steps.fetch_kernel.outputs.out }}
+            .ccache
+          key: kernel-${{ matrix.kernel_line }}-${{ hashFiles('extra_modules/**/*.c', 'extra_modules/**/Makefile') }}
+          restore-keys: |
+            kernel-${{ matrix.kernel_line }}-
+
+      - name: 使用本地构建脚本
+        if: steps.filter.outputs.build == '1' && steps.setup_scripts.outputs.method == 'local_script'
+        run: |
+          export KERNEL_SRC="${{ steps.fetch_kernel.outputs.src }}"
+          export KERNEL_OUT="${{ steps.fetch_kernel.outputs.out }}"
+          export VERBOSE=1
+          
+          echo "[i] 环境变量:"
+          echo "KERNEL_SRC=$KERNEL_SRC"
+          echo "KERNEL_OUT=$KERNEL_OUT"
+          
+          # 使用本地脚本构建
+          chmod +x "${{ steps.setup_scripts.outputs.script }}"
+          ./${{ steps.setup_scripts.outputs.script }}
+          
+          # 检查输出
+          if [[ -f extra_modules/batt_design_override/batt_design_override.ko ]]; then
+            echo "[✓] batt_design_override.ko 构建成功"
+            file extra_modules/batt_design_override/batt_design_override.ko
+          else
+            echo "[✗] batt_design_override.ko 构建失败"
+            exit 1
+          fi
+
+      - name: 构建充电模块
+        if: steps.filter.outputs.build == '1'
+        run: |
+          # 检查是否有对应的充电模块构建脚本
+          CHG_SCRIPT="scripts/build_chg_module_${{ matrix.kernel_line }}.sh"
+          if [[ -f "$CHG_SCRIPT" ]]; then
+            export KERNEL_SRC="${{ steps.fetch_kernel.outputs.src }}"
+            export KERNEL_OUT="${{ steps.fetch_kernel.outputs.out }}"
+            chmod +x "$CHG_SCRIPT"
+            ./"$CHG_SCRIPT" || echo "[warn] 充电模块构建失败，继续"
+          else
+            echo "[i] 未找到充电模块构建脚本: $CHG_SCRIPT"
+          fi
+
+      - name: 验证模块兼容性
+        if: steps.filter.outputs.build == '1'
+        run: |
+          echo "[i] 模块信息验证:"
+          for ko in extra_modules/*/*.ko; do
+            if [[ -f "$ko" ]]; then
+              echo "=== $(basename "$ko") ==="
+              file "$ko"
+              # 如果有 modinfo，显示模块信息
+              if command -v modinfo >/dev/null 2>&1; then
+                modinfo "$ko" | head -10 || true
+              fi
+              echo
+            fi
+          done
+
+      - name: 解析版本号
+        if: steps.filter.outputs.build == '1'
+        id: ver
+        run: |
+          BASE_VER=$(grep -E '^version=' packaging/magisk-batt-design-override/module.prop | cut -d= -f2-)
+          if [[ -n "${{ github.event.inputs.version }}" ]]; then
+            VER='${{ github.event.inputs.version }}'
+          else
+            VER="$BASE_VER-$(date +%Y%m%d)"
+          fi
+          echo "version=$VER" >> $GITHUB_OUTPUT
+          echo "VERSION=$VER" >> $GITHUB_ENV
+
+      - name: 打包 Magisk 模块
+        if: steps.filter.outputs.build == '1'
+        run: |
+          mkdir -p dist packaging/magisk-batt-design-override/common
+          
+          # 复制模块文件
+          cp -f extra_modules/batt_design_override/batt_design_override.ko \
+            packaging/magisk-batt-design-override/common/ || true
+          cp -f extra_modules/chg_param_override/chg_param_override.ko \
+            packaging/magisk-batt-design-override/common/ || true
+          
+          # 打包
+          bash packaging/build_magisk_zip.sh \
+            --ko extra_modules/batt_design_override/batt_design_override.ko \
+            --kernel-line ${{ matrix.kernel_line }} \
+            --version $VERSION \
+            --output dist
+
+      - name: 准备发布文件
+        if: steps.filter.outputs.build == '1'
+        run: |
+          mkdir -p release_out
+          
+          # 复制 .ko 文件（带版本标识）
+          if [[ -f extra_modules/batt_design_override/batt_design_override.ko ]]; then
+            cp extra_modules/batt_design_override/batt_design_override.ko \
+              "release_out/batt_design_override-${{ matrix.kernel_line }}.ko"
+          fi
+          
+          if [[ -f extra_modules/chg_param_override/chg_param_override.ko ]]; then
+            cp extra_modules/chg_param_override/chg_param_override.ko \
+              "release_out/chg_param_override-${{ matrix.kernel_line }}.ko"
+          fi
+          
+          # 复制 ZIP 文件
+          cp dist/*.zip release_out/ || true
+          
+          echo "[i] 发布文件:"
+          ls -la release_out/
+
+      - name: 上传构件
+        if: steps.filter.outputs.build == '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: batt-design-override-enhanced-${{ matrix.kernel_line }}
+          path: release_out/*
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: github.event.inputs.release == 'true'
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - name: 下载构件
+        uses: actions/download-artifact@v4
+        with:
+          path: collected
+
+      - name: 生成发布说明
+        run: |
+          echo "# Battery Design Override Modules" > NOTES.md
+          echo "" >> NOTES.md
+          echo "构建时间: $(date '+%Y-%m-%d %H:%M:%S UTC')" >> NOTES.md
+          echo "版本: ${{ needs.build.outputs.version }}" >> NOTES.md
+          echo "" >> NOTES.md
+          echo "## 包含文件:" >> NOTES.md
+          find collected -name '*.ko' -printf '* %f\n' | sort >> NOTES.md
+          find collected -name '*.zip' -printf '* %f\n' | sort >> NOTES.md
+
+      - name: 创建 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.build.outputs.version }}
+          name: "Battery Override v${{ needs.build.outputs.version }}"
+          body_path: NOTES.md
+          files: collected/**/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
