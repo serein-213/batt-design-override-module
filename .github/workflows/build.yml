@@ -223,6 +223,25 @@ jobs:
             CC=clang LD=ld.lld CLANG_TRIPLE=$CLANG_TRIPLE CROSS_COMPILE=$CROSS_COMPILE \
             M="$MOD_DIR_ABS" -j$(nproc) modules
           test -f "$MOD_DIR_ABS/batt_design_override.ko"
+      - name: 构建 chg 模块
+        if: steps.filter.outputs.build == '1'
+        run: |
+          set -e
+          KERNEL_SRC='${{ steps.fetch_kernel.outputs.src }}'
+          KERNEL_OUT='${{ steps.fetch_kernel.outputs.out }}'
+          ARCH=arm64
+          CROSS_COMPILE=aarch64-linux-gnu-
+          CLANG_TRIPLE=aarch64-linux-gnu-
+          export LLVM=1 LLVM_IAS=1 ARCH CROSS_COMPILE CLANG_TRIPLE
+          MOD_DIR_ABS=$(pwd)/extra_modules/chg_param_override
+          if [[ ! -f "$MOD_DIR_ABS/Makefile" ]]; then
+            echo "::error ::模块 Makefile 不存在: $MOD_DIR_ABS/Makefile"; exit 2
+          fi
+          echo "[i] 使用外部模块目录: $MOD_DIR_ABS"
+          make -C "$KERNEL_SRC" O="$KERNEL_OUT" ARCH=$ARCH LLVM=1 LLVM_IAS=1 \
+            CC=clang LD=ld.lld CLANG_TRIPLE=$CLANG_TRIPLE CROSS_COMPILE=$CROSS_COMPILE \
+            M="$MOD_DIR_ABS" -j$(nproc) modules
+          test -f "$MOD_DIR_ABS/chg_param_override.ko"
       - name: 解析版本号
         if: steps.filter.outputs.build == '1'
         id: ver
@@ -239,10 +258,10 @@ jobs:
         if: steps.filter.outputs.build == '1'
         run: |
           mkdir -p dist
-          echo "[dbg] 打包脚本权限:"; ls -l packaging/build_magisk_zip.sh || true
-          if [[ ! -x packaging/build_magisk_zip.sh ]]; then
-            echo "[i] 修复执行权限 (chmod +x)"; chmod +x packaging/build_magisk_zip.sh || true
-          fi
+          # 拷入两个 .ko，便于脚本整体打包
+          mkdir -p packaging/magisk-batt-design-override/common
+          cp -f extra_modules/batt_design_override/batt_design_override.ko packaging/magisk-batt-design-override/common/ || true
+          cp -f extra_modules/chg_param_override/chg_param_override.ko packaging/magisk-batt-design-override/common/ || true
           bash packaging/build_magisk_zip.sh \
             --ko extra_modules/batt_design_override/batt_design_override.ko \
             --kernel-line ${{ matrix.kernel_line }} \
@@ -256,6 +275,7 @@ jobs:
           name: batt-design-override-${{ matrix.kernel_line }}
           path: |
             extra_modules/batt_design_override/batt_design_override.ko
+            extra_modules/chg_param_override/chg_param_override.ko
             dist/*.zip
           if-no-files-found: error
 
