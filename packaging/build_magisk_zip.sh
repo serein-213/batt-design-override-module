@@ -58,9 +58,8 @@ STAGE="$OUT_DIR/${BASE_ID}-${KERNEL_LINE}-stage"
 rm -rf "$STAGE" && mkdir -p "$STAGE/common"
 rsync -a "$MODULE_DIR/" "$STAGE/"
 
-# 放置 .ko（保留一个固定名 + 带 kernel line 的别名，方便多版本共存）
+# 放置 .ko（只保留带内核版本号的模块文件，避免重复）
 cp -f "$KO_PATH" "$STAGE/common/batt_design_override.ko"
-cp -f "$KO_PATH" "$STAGE/common/batt_design_override-${KERNEL_LINE}.ko" || true
 
 # 更新 stage 里的 module.prop 版本号（不回写原始源码）
 sed -i "s/^version=.*/version=$VERSION/" "$STAGE/module.prop"
