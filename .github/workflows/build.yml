@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       kernel_lines:
-        description: '内核主线列表: 5.4,5.10,5.15,6.1,6.6 (空=全部)'
+        description: '内核主线列表: 5.4,5.10,5.15,6.1 (空=全部)'
         required: false
         default: ''
       version:
@@ -36,7 +36,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        kernel_line: ["5.4", "5.10", "5.15", "6.1", "6.6"]
+        kernel_line: ["5.4", "5.10", "5.15", "6.1"]
     env:
       MODULE_ID: batt-design-override
       MAGISK_DIR: packaging/magisk-batt-design-override
@@ -64,18 +64,7 @@ jobs:
         if: steps.filter.outputs.build == '1'
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            cpio libelf-dev libdw-dev libdwarf-dev pkg-config \
-            bc flex bison python3 rsync build-essential zip unzip file jq git \
-            lld clang llvm llvm-dev llvm-runtime || true
-          # 尝试优先使用较新的 clang（18/17/16），以兼容 6.6 及 mainline
-          for v in 18 17 16; do \
-            if command -v clang-$v >/dev/null 2>&1; then \
-              sudo ln -sf $(command -v clang-$v) /usr/local/bin/clang; \
-              if command -v ld.lld-$v >/dev/null 2>&1; then sudo ln -sf $(command -v ld.lld-$v) /usr/local/bin/ld.lld; fi; \
-              break; \
-            fi; \
-          done
+          sudo apt-get install -y --no-install-recommends cpio libelf-dev bc flex bison python3 rsync build-essential zip unzip file jq git lld clang llvm llvm-dev llvm-runtime
           echo "[i] Host clang:"; clang --version || true
           echo "[i] Host ld.lld path:"; command -v ld.lld || true
           # 某些 runner 镜像可能只有 /usr/lib/llvm-*/bin/ld.lld 未放入 PATH
@@ -93,7 +82,6 @@ jobs:
             5.10) CANDIDATES=(android12-5.10 android13-5.10 android-mainline); OUT=gki/out-5.10 ;;
             5.15) CANDIDATES=(android13-5.15 android14-6.1 android-mainline); OUT=gki/out-5.15 ;;
             6.1)  CANDIDATES=(android14-6.1 android-mainline); OUT=gki/out-6.1 ;;
-            6.6)  CANDIDATES=(android16-6.6 android-mainline); OUT=gki/out-6.6 ;;
             *) echo '未知 kernel_line' >&2; exit 2;;
           esac
           mkdir -p gki "$OUT"
