@@ -84,7 +84,7 @@ jobs:
       - name: 过滤所需内核
         id: filter
         run: |
-          REQ='${{ github.event.inputs.kernel_lines }}'
+          REQ='${{ inputs.kernel_lines }}'
           if [[ -z "$REQ" || "$REQ" == "5.4,5.10,5.15,6.1" ]]; then 
             B=1
           else
@@ -134,8 +134,8 @@ jobs:
         run: |
           set -e
           CANDIDATES='${{ steps.branch_select.outputs.candidates }}'
-          CUSTOM_URL='${{ github.event.inputs.custom_repo_url }}'
-          CUSTOM_REF='${{ github.event.inputs.custom_ref }}'
+          CUSTOM_URL='${{ inputs.custom_repo_url }}'
+          CUSTOM_REF='${{ inputs.custom_ref }}'
           if [[ -n "$CUSTOM_URL" && -n "$CUSTOM_REF" ]]; then
             echo "[i] 使用自定义仓库: $CUSTOM_URL @ $CUSTOM_REF"
             git clone --depth=1 --branch "$CUSTOM_REF" "$CUSTOM_URL" gki/custom-src
@@ -161,7 +161,7 @@ jobs:
           echo "out=${{ steps.branch_select.outputs.out }}" >> $GITHUB_OUTPUT
           echo "[i] 已选择: $SELECTED -> $SRC_PATH"
       - name: 强制刷新源码 (可选)
-        if: steps.filter.outputs.build == '1' && github.event.inputs.refresh_sources == 'true'
+        if: steps.filter.outputs.build == '1' && inputs.refresh_sources
         run: |
           SRC='${{ steps.fetch_kernel.outputs.src }}'
           BR='${{ steps.fetch_kernel.outputs.branch }}'
@@ -173,7 +173,7 @@ jobs:
             git clone --depth=1 --branch "$BR" https://android.googlesource.com/kernel/common "$SRC"
           fi
       - name: 启用调试模式
-        if: steps.filter.outputs.build == '1' && github.event.inputs.enable_debug == 'true'
+        if: steps.filter.outputs.build == '1' && inputs.enable_debug
         run: |
           echo "VERBOSE_BUILD=1" >> $GITHUB_ENV
           echo "DEBUG_MODE=1" >> $GITHUB_ENV
@@ -188,35 +188,35 @@ jobs:
           echo "mod_hash=$MOD_HASH" >> $GITHUB_OUTPUT
           echo "::notice title=ModuleHash::$MOD_HASH"
       - name: 缓存源码
-        if: steps.filter.outputs.build == '1' && github.event.inputs.skip_cache != 'true'
+        if: steps.filter.outputs.build == '1' && !inputs.skip_cache
         uses: actions/cache@v4
         with:
           path: ${{ steps.fetch_kernel.outputs.src }}
-          key: src-${{ steps.fetch_kernel.outputs.branch }}-${{ steps.meta.outputs.date }}-${{ github.event.inputs.skip_cache }}
+          key: src-${{ steps.fetch_kernel.outputs.branch }}-${{ steps.meta.outputs.date }}-${{ inputs.skip_cache }}
           restore-keys: |
             src-${{ steps.fetch_kernel.outputs.branch }}-
       - name: 缓存 out
-        if: steps.filter.outputs.build == '1' && github.event.inputs.skip_cache != 'true'
+        if: steps.filter.outputs.build == '1' && !inputs.skip_cache
         uses: actions/cache@v4
         with:
           path: ${{ steps.fetch_kernel.outputs.out }}
-          key: out-${{ steps.fetch_kernel.outputs.branch }}-${{ steps.meta.outputs.date }}-${{ steps.meta.outputs.mod_hash }}-${{ github.event.inputs.skip_cache }}
+          key: out-${{ steps.fetch_kernel.outputs.branch }}-${{ steps.meta.outputs.date }}-${{ steps.meta.outputs.mod_hash }}-${{ inputs.skip_cache }}
           restore-keys: |
             out-${{ steps.fetch_kernel.outputs.branch }}-${{ steps.meta.outputs.date }}-
             out-${{ steps.fetch_kernel.outputs.branch }}-
       - name: 缓存 ccache
-        if: steps.filter.outputs.build == '1' && github.event.inputs.skip_cache != 'true'
+        if: steps.filter.outputs.build == '1' && !inputs.skip_cache
         uses: actions/cache@v4
         with:
           path: .ccache
-          key: ccache-${{ steps.fetch_kernel.outputs.branch }}-${{ steps.meta.outputs.mod_hash }}-${{ github.event.inputs.skip_cache }}
+          key: ccache-${{ steps.fetch_kernel.outputs.branch }}-${{ steps.meta.outputs.mod_hash }}-${{ inputs.skip_cache }}
           restore-keys: |
             ccache-${{ steps.fetch_kernel.outputs.branch }}-
       - name: 跳过缓存提示
-        if: steps.filter.outputs.build == '1' && github.event.inputs.skip_cache == 'true'
+        if: steps.filter.outputs.build == '1' && inputs.skip_cache
         run: echo "[i] 跳过缓存 - 将进行完全重新构建"
       - name: 构建模块
-        if: steps.filter.outputs.build == '1' && (github.event.inputs.build_type == 'both' || github.event.inputs.build_type == 'batt_only')
+        if: steps.filter.outputs.build == '1' && (inputs.build_type == 'both' || inputs.build_type == 'batt_only')
         run: |
           set -e
           [[ "${DEBUG_MODE:-0}" == "1" ]] && set -x
@@ -335,7 +335,7 @@ EOF
           test -f "$MOD_DIR_ABS/batt_design_override.ko"
           echo "[✓] 电池模块构建完成"
       - name: 构建 chg 模块
-        if: steps.filter.outputs.build == '1' && (github.event.inputs.build_type == 'both' || github.event.inputs.build_type == 'chg_only')
+        if: steps.filter.outputs.build == '1' && (inputs.build_type == 'both' || inputs.build_type == 'chg_only')
         run: |
           set -e
           [[ "${DEBUG_MODE:-0}" == "1" ]] && set -x
@@ -393,8 +393,8 @@ EOF
         id: ver
         run: |
           BASE_VER=$(grep -E '^version=' packaging/magisk-batt-design-override/module.prop | cut -d= -f2-)
-          if [[ -n "${{ github.event.inputs.version }}" ]]; then
-            VER='${{ github.event.inputs.version }}'
+          if [[ -n "${{ inputs.version }}" ]]; then
+            VER='${{ inputs.version }}'
           else
             VER="$BASE_VER"
           fi
@@ -433,10 +433,10 @@ EOF
             fi
           fi
       - name: 上传构件
-        if: steps.filter.outputs.build == '1' && github.event.inputs.upload_artifacts == 'true'
+        if: steps.filter.outputs.build == '1' && inputs.upload_artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: batt-design-override-${{ matrix.kernel_line }}-${{ github.event.inputs.build_type }}
+          name: batt-design-override-${{ matrix.kernel_line }}-${{ inputs.build_type }}
           path: |
             release_out/*
             dist/*.zip
@@ -444,7 +444,7 @@ EOF
 
   release:
     needs: build
-    if: github.event.inputs.release == true
+    if: inputs.release
     runs-on: ubuntu-22.04
     permissions:
       contents: write
