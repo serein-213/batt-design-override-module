@@ -29,6 +29,7 @@ if [[ -z "$VERSION" ]]; then
 fi
 BASE_ID=$(grep -E '^id=' "$MODULE_PROP" | cut -d= -f2- | tr -d '\r')
 mkdir -p "$OUT_DIR"
+OUT_DIR=$(cd -- "$OUT_DIR" && pwd)
 STAGE="$OUT_DIR/${BASE_ID}-${KERNEL_LINE}-stage"
 rm -rf "$STAGE"; mkdir -p "$STAGE"
 rsync -a "$MODULE_DIR/" "$STAGE/"
