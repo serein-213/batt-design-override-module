@@ -36,5 +36,5 @@ cp -f "$KO_PATH" "$STAGE/common/batt_design_override.ko"
 cp -f "$KO_PATH" "$STAGE/common/batt_design_override-${KERNEL_LINE}.ko" || true
 sed -i "s/^version=.*/version=$VERSION/" "$STAGE/module.prop"
 ZIP_NAME="${BASE_ID}-${VERSION}-${KERNEL_LINE}${ID_SUFFIX:+-$ID_SUFFIX}.zip"
-(cd "$OUT_DIR" && zip -r9 "$ZIP_NAME" "$(basename "$STAGE")" >/dev/null)
+(cd "$STAGE" && zip -r9 "$OUT_DIR/$ZIP_NAME" . >/dev/null)
 echo "[✓] $OUT_DIR/$ZIP_NAME"
