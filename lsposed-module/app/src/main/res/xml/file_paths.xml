@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- 公开整个 Download 目录中的 APK 文件（不再使用子目录） -->
+    <external-path
+        name="download_root"
+        path="Download/" />
+</paths>

@@ -31,6 +31,15 @@ class MagiskModuleManager(private val context: Context) {
         val message: String,
         val modulePath: String? = null
     )
+
+    data class DetailedInstallResult(
+        val success: Boolean,
+        val installedFile: String? = null,
+        val triedFileNames: List<String> = emptyList(),
+        val errorMessages: List<String> = emptyList(),
+        val autoLoaded: Boolean = false,
+        val autoLoadOutput: String? = null
+    )
     
     /** 检查 Magisk/KernelSU 模块环境是否可用 */
     suspend fun isMagiskAvailable(): Boolean = withContext(Dispatchers.IO) {
@@ -207,18 +216,63 @@ class MagiskModuleManager(private val context: Context) {
             
             log "检测到内核版本: ${'$'}KREL (主版本: ${'$'}MAJOR_MINOR)"
             
-            # 查找可用的 .ko 文件（按优先级排序）
-            KO_CANDIDATES="batt_design_override-android*-${'$'}{MAJOR_MINOR}.ko batt_design_override-${'$'}{MAJOR_MINOR}.ko batt_design_override-${'$'}{MAJOR_MINOR%.*}.ko batt_design_override.ko"
+            # 查找可用的 .ko 文件（按优先级排序，完全匹配优先）
+            # 1. 完全匹配：android版本+完整内核版本
+            # 2. 完全匹配：android版本+主次版本  
+            # 3. 简化匹配：完整内核版本
+            # 4. 简化匹配：主次版本
+            # 5. 通用匹配
+            ANDROID_VERSIONS="android11 android12 android13 android14 android15"
             KO_SELECTED=""
             
-            for pattern in ${'$'}KO_CANDIDATES; do
-                for f in ${'$'}COMM_DIR/${'$'}pattern; do
-                    if [ -f "${'$'}f" ]; then 
-                        KO_SELECTED="${'$'}f"
-                        break 2
+            # 优先级1: 完全匹配 android版本+完整内核版本
+            for android_ver in ${'$'}ANDROID_VERSIONS; do
+                ko_file="${'$'}COMM_DIR/batt_design_override-${'$'}{android_ver}-${'$'}{KREL}.ko"
+                if [ -f "${'$'}ko_file" ]; then
+                    KO_SELECTED="${'$'}ko_file"
+                    log "找到完全匹配的模块 (android+完整版本): ${'$'}(basename "${'$'}KO_SELECTED")"
+                    break
+                fi
+            done
+            
+            # 优先级2: 完全匹配 android版本+主次版本
+            if [ -z "${'$'}KO_SELECTED" ]; then
+                for android_ver in ${'$'}ANDROID_VERSIONS; do
+                    ko_file="${'$'}COMM_DIR/batt_design_override-${'$'}{android_ver}-${'$'}{MAJOR_MINOR}.ko"
+                    if [ -f "${'$'}ko_file" ]; then
+                        KO_SELECTED="${'$'}ko_file"
+                        log "找到完全匹配的模块 (android+主次版本): ${'$'}(basename "${'$'}KO_SELECTED")"
+                        break
                     fi
                 done
-            done
+            fi
+            
+            # 优先级3: 简化匹配 完整内核版本
+            if [ -z "${'$'}KO_SELECTED" ]; then
+                ko_file="${'$'}COMM_DIR/batt_design_override-${'$'}{KREL}.ko"
+                if [ -f "${'$'}ko_file" ]; then
+                    KO_SELECTED="${'$'}ko_file"
+                    log "找到匹配的模块 (完整版本): ${'$'}(basename "${'$'}KO_SELECTED")"
+                fi
+            fi
+            
+            # 优先级4: 简化匹配 主次版本
+            if [ -z "${'$'}KO_SELECTED" ]; then
+                ko_file="${'$'}COMM_DIR/batt_design_override-${'$'}{MAJOR_MINOR}.ko"
+                if [ -f "${'$'}ko_file" ]; then
+                    KO_SELECTED="${'$'}ko_file"
+                    log "找到匹配的模块 (主次版本): ${'$'}(basename "${'$'}KO_SELECTED")"
+                fi
+            fi
+            
+            # 优先级5: 通用匹配
+            if [ -z "${'$'}KO_SELECTED" ]; then
+                ko_file="${'$'}COMM_DIR/batt_design_override.ko"
+                if [ -f "${'$'}ko_file" ]; then
+                    KO_SELECTED="${'$'}ko_file"
+                    log "找到通用模块: ${'$'}(basename "${'$'}KO_SELECTED")"
+                fi
+            fi
             
             if [ -z "${'$'}KO_SELECTED" ]; then
                 log "未找到匹配的内核模块"
@@ -340,11 +394,20 @@ class MagiskModuleManager(private val context: Context) {
             val modulePath = getModulePath()
             val commonPath = "$modulePath/common"
             
-            // 使用 root shell 检查目录是否存在
-            val checkDirResult = RootShell.exec("[ -d '$modulePath' ] && [ -d '$commonPath' ]")
+            // 使用 root shell 检查目录是否存在；若不存在尝试自动创建轻量模块
+            var checkDirResult = RootShell.exec("[ -d '$modulePath' ] && [ -d '$commonPath' ]")
             if (checkDirResult.code != 0) {
-                android.util.Log.e("MagiskModuleManager", "Module directories do not exist: $modulePath or $commonPath")
-                return@withContext false
+                android.util.Log.w("MagiskModuleManager", "Module directory missing, attempting auto create: $modulePath")
+                // 尝试自动创建（忽略返回值，仅用于兜底）
+                runCatching { createLightweightModule() }.onFailure {
+                    android.util.Log.w("MagiskModuleManager", "Auto create lightweight module failed: ${it.message}")
+                }
+                // 重新检测
+                checkDirResult = RootShell.exec("[ -d '$modulePath' ] && [ -d '$commonPath' ]")
+                if (checkDirResult.code != 0) {
+                    android.util.Log.e("MagiskModuleManager", "Module directories still absent after auto-create: $modulePath")
+                    return@withContext false
+                }
             }
             
             // 检查源文件是否存在
@@ -394,6 +457,8 @@ class MagiskModuleManager(private val context: Context) {
                         if (verifyResult.code == 0) {
                             android.util.Log.d("MagiskModuleManager", "Successfully installed: $fileName")
                             android.util.Log.d("MagiskModuleManager", "File info: ${verifyResult.out}")
+                            // 记录一个标记文件供前端诊断（非必须）
+                            RootShell.exec("echo 'installed:$fileName' > '$commonPath/.last_install' 2>/dev/null || true")
                             success = true
                             break
                         } else {
@@ -414,6 +479,90 @@ class MagiskModuleManager(private val context: Context) {
         } catch (e: Exception) {
             android.util.Log.e("MagiskModuleManager", "Installation failed", e)
             false
+        }
+    }
+
+    /** 详细安装：返回所有尝试与错误，可选立即 insmod 试运行（防止重启策略见调用端控制） */
+    suspend fun installKernelModuleDetailed(
+        moduleName: String,
+        koFilePath: String,
+        version: String,
+        autoLoad: Boolean = false,
+        loadParams: String = ""
+    ): DetailedInstallResult = withContext(Dispatchers.IO) {
+        val errors = mutableListOf<String>()
+        val tried = mutableListOf<String>()
+        var installed: String? = null
+        var autoLoaded = false
+        var autoLoadOut: String? = null
+        try {
+            val modulePath = getModulePath()
+            val commonPath = "$modulePath/common"
+            var checkDirResult = RootShell.exec("[ -d '$modulePath' ] && [ -d '$commonPath' ]")
+            if (checkDirResult.code != 0) {
+                runCatching { createLightweightModule() }.onFailure { errors.add("autoCreateFailed:${it.message}") }
+                checkDirResult = RootShell.exec("[ -d '$modulePath' ] && [ -d '$commonPath' ]")
+                if (checkDirResult.code != 0) {
+                    errors.add("noModuleDir:$modulePath")
+                    return@withContext DetailedInstallResult(false, null, tried, errors)
+                }
+            }
+
+            val sourceFile = java.io.File(koFilePath)
+            if (!sourceFile.exists()) {
+                errors.add("sourceMissing:$koFilePath")
+                return@withContext DetailedInstallResult(false, null, tried, errors)
+            }
+            val fileNames = generateKernelModuleFileNames(moduleName, version, sourceFile.name)
+            for (fn in fileNames) {
+                tried.add(fn)
+                val targetPath = "$commonPath/$fn"
+                val rm = RootShell.exec("rm -f '$targetPath'")
+                if (rm.code != 0) {
+                    errors.add("rmFail:$fn:${rm.err}")
+                    continue
+                }
+                val cp = RootShell.exec("cp '${sourceFile.absolutePath}' '$targetPath'")
+                if (cp.code != 0) {
+                    errors.add("cpFail:$fn:${cp.err}")
+                    continue
+                }
+                val chmod = RootShell.exec("chmod 644 '$targetPath'")
+                if (chmod.code != 0) {
+                    errors.add("chmodFail:$fn:${chmod.err}")
+                    continue
+                }
+                val verify = RootShell.exec("[ -f '$targetPath' ] && ls -l '$targetPath'")
+                if (verify.code != 0) {
+                    errors.add("verifyFail:$fn:${verify.err}")
+                    continue
+                }
+                RootShell.exec("echo 'installed:$fn' > '$commonPath/.last_install' 2>/dev/null || true")
+                installed = fn
+                break
+            }
+            if (installed == null) {
+                return@withContext DetailedInstallResult(false, null, tried, errors)
+            }
+
+            if (autoLoad) {
+                // 仅尝试用户指定的新复制文件 (不做多轮搜索) 避免与 service.sh 交叉叠加风险
+                val insmodCmd = buildString {
+                    append("insmod '$modulePath/common/$installed'")
+                    if (loadParams.isNotBlank()) append(' ').append(loadParams)
+                }
+                val result = RootShell.exec(insmodCmd)
+                autoLoaded = result.code == 0
+                autoLoadOut = "code=${result.code} out=${result.out} err=${result.err}".take(400)
+                if (!autoLoaded) {
+                    // 不删除已安装文件，只报告失败
+                    errors.add("autoLoadFail:${result.err}")
+                }
+            }
+            DetailedInstallResult(true, installed, tried, errors, autoLoaded, autoLoadOut)
+        } catch (e: Exception) {
+            errors.add("exception:${e.message}")
+            DetailedInstallResult(false, installed, tried, errors, autoLoaded, autoLoadOut)
         }
     }
     

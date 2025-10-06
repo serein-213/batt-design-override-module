@@ -96,45 +96,43 @@ class ModuleManager(
         return@withContext null
     }
     
-    /** 构建可能的文件名列表 */
+    /** 构建可能的文件名列表（按完全匹配优先级排序） */
     private fun buildPossibleFileNames(moduleName: String, kernelVersion: KernelVersion): List<String> {
         val fileNames = mutableListOf<String>()
         
-        // 1. 完整版本匹配（最高优先级）
-        // 格式：modulename-android13-5.15.ko
+        // 获取对应的Android版本
         val androidVersion = getAndroidVersionFromKernel(kernelVersion.majorMinor)
+        
+        // 按您要求的优先级排序：
+        // 1. 完全匹配：android版本+完整内核版本 (例如: batt_design_override-android13-5.15.192.ko)
         if (androidVersion != null) {
-            fileNames.add("${moduleName}-${androidVersion}-${kernelVersion.majorMinor}.ko")
+            fileNames.add("${moduleName}-${androidVersion}-${kernelVersion.full}.ko")
             fileNames.add("${moduleName}-${androidVersion}-${kernelVersion.base}.ko")
         }
         
-        // 2. 内核版本匹配
-        // 格式：modulename-5.15.ko, modulename-5.15.123.ko
-        fileNames.add("${moduleName}-${kernelVersion.majorMinor}.ko")
+        // 2. 完全匹配：android版本+主次版本 (例如: batt_design_override-android13-5.15.ko)
+        if (androidVersion != null) {
+            fileNames.add("${moduleName}-${androidVersion}-${kernelVersion.majorMinor}.ko")
+        }
+        
+        // 3. 简化匹配：完整内核版本 (例如: batt_design_override-5.15.192.ko)
+        fileNames.add("${moduleName}-${kernelVersion.full}.ko")
         fileNames.add("${moduleName}-${kernelVersion.base}.ko")
         
-        // 3. 主版本匹配
-        // 格式：modulename-5.ko
-        val majorVersion = kernelVersion.majorMinor.split(".").firstOrNull()
-        if (majorVersion != null) {
-            fileNames.add("${moduleName}-${majorVersion}.ko")
-        }
+        // 4. 简化匹配：主次版本 (例如: batt_design_override-5.15.ko)
+        fileNames.add("${moduleName}-${kernelVersion.majorMinor}.ko")
         
-        // 4. 带版本标识的文件
-        // 格式：modulename-v1.2.1-5.15.ko, modulename-1.2.1-5.15.ko
-        val commonVersions = listOf("v1.2.1", "1.2.1", "v1.2", "1.2", "latest")
-        for (version in commonVersions) {
-            fileNames.add("${moduleName}-${version}-${kernelVersion.majorMinor}.ko")
-            if (androidVersion != null) {
-                fileNames.add("${moduleName}-${version}-${androidVersion}-${kernelVersion.majorMinor}.ko")
-            }
-        }
-        
-        // 5. 通用文件名（最低优先级）
-        // 格式：modulename.ko
+        // 5. 通用匹配 (例如: batt_design_override.ko)
         fileNames.add("${moduleName}.ko")
         
+        // 去重并保持顺序
         return fileNames.distinct()
+    }
+
+    /** 提供给 UI 展示的候选 .ko 文件名列表 (按优先级去重) */
+    suspend fun listCandidateModuleNames(target: String = moduleName): List<String> = withContext(Dispatchers.IO) {
+        val kv = getKernelVersion()
+        buildPossibleFileNames(target, kv)
     }
     
     /** 根据内核版本获取对应的 Android 版本标识 */

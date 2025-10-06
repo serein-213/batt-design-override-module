@@ -1,0 +1,55 @@
+# Baseline Profile for com.override.battcaplsp
+# 说明:
+# 1. 覆盖应用冷启动关键路径 (Application -> MainActivity -> 首屏 Compose)
+# 2. 覆盖常用 Repository / Shell 初始化, 避免首次 I/O JIT 抖动
+# 3. 覆盖状态/日志相关解析工具, 提升首次交互流畅度
+# 4. 后续可用 Macrobenchmark 生成并追加自动化 profile
+# ---------------------------------------------------------------------------------
+# 语法修正说明:
+# - 原先使用的 HSPL 是无效标记。正式 baseline profile 使用 L<class/Name;> 形式 (ART profile)，
+#   或 AOT class 前缀 H? 并不在手写 profile 中使用。这里采用最简 Lclass; 列出关键类。
+# - 包名用点号，类用 / 分隔最后一段再加分号。
+Lcom/override/battcaplsp/App;
+Lcom/override/battcaplsp/MainActivity;
+
+Landroidx/profileinstaller/ProfileInstallerInitializer;
+# Compose runtime / Material3 常用热点（示例；后续用 Macrobenchmark 自动生成更佳）
+Landroidx/compose/runtime/ComposerImpl;
+Landroidx/compose/runtime/SlotWriter;
+Landroidx/compose/runtime/SlotReader;
+Landroidx/compose/runtime/RecomposeScopeImpl;
+Landroidx/compose/ui/platform/AndroidComposeView;
+Landroidx/compose/material3/SurfaceKt;
+Landroidx/compose/material3/TextKt;
+Landroidx/compose/material3/ButtonKt;
+Landroidx/compose/material3/ScaffoldKt;
+
+## 状态解析 & 截断工具
+Lcom/override/battcaplsp/ui/StatusWidgetsKt;
+Lcom/override/battcaplsp/core/TextAbbrev;
+
+## Root / shell 初始化 (libsu)
+Lcom/topjohnwu/superuser/Shell;
+Lcom/topjohnwu/superuser/Shell$Builder;
+Lcom/topjohnwu/superuser/io/SuRandomAccessFile;
+
+## DataStore (偏好初始化路径)
+Landroidx/datastore/preferences/core/PreferenceDataStoreFactory;
+Landroidx/datastore/preferences/PreferencesKt;
+
+## 协程调度常用类 (调度主线程/默认线程池)
+Lkotlinx/coroutines/Dispatchers;
+Lkotlinx/coroutines/internal/DispatchedContinuation;
+
+## Repository / Module 管理
+Lcom/override/battcaplsp/core/ParamRepository;
+Lcom/override/battcaplsp/core/ChgParamRepository;
+Lcom/override/battcaplsp/core/ConfigSync;
+Lcom/override/battcaplsp/core/ChgModuleManager;
+
+## 日志查看组件（避免首次打开日志窗口卡顿）
+Lcom/override/battcaplsp/ui/LogViewer;
+
+# NOTE:
+# - 初始手写 Profile 旨在为 release 编译提供 AOT 提示，后续使用 Macrobenchmark + profileinstaller 插件生成更精确版本。
+# - 若包结构有调整或类被混淆，需要 keep 关键入口以免映射失效。

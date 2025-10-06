@@ -11,8 +11,10 @@ android {
         applicationId 'com.override.battcaplsp'
         minSdk 27
         targetSdk 34
-        versionCode 202
-        versionName '2.0.2'
+        versionCode 206
+        versionName '2.0.6'
+        // 限定仅包含常用语言资源，减少 res 体积（如需英文+简体中文，可按需增减）
+        resConfigs 'en', 'zh'
     }
 
     signingConfigs {
@@ -32,9 +34,18 @@ android {
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
             // Sign with debug keystore for convenience
             signingConfig signingConfigs.debug
+            // Debug 面板关闭
+            buildConfigField 'boolean', 'ENABLE_INTERNAL_DEBUG_PANEL', 'false'
         }
         debug {
             signingConfig signingConfigs.debug
+            // 区分包名 & 版本后缀
+            applicationIdSuffix ".debug"
+            versionNameSuffix "-debug"
+            // 开启内部调试面板
+            buildConfigField 'boolean', 'ENABLE_INTERNAL_DEBUG_PANEL', 'true'
+            // 保持可调试
+            debuggable true
         }
     }
 
@@ -49,10 +60,28 @@ android {
 
     buildFeatures {
         compose true
+        buildConfig true
     }
     composeOptions {
         kotlinCompilerExtensionVersion '1.5.14'
     }
+
+    packagingOptions {
+        resources {
+            excludes += [
+                    'META-INF/LICENSE*',
+                    'META-INF/AL2.0',
+                    'META-INF/LGPL2.1',
+                    'META-INF/DEPENDENCIES',
+                    'META-INF/gradle/incremental.annotation.processors',
+                    'META-INF/*.version',
+                    'META-INF/*.kotlin_module'
+            ]
+        }
+    }
+
+    // 关闭不必要的调试信息（release 已 minify）
+    kotlinOptions.freeCompilerArgs += ['-Xno-param-assertions','-Xno-call-assertions']
 
     lint {
         abortOnError false
@@ -74,7 +103,7 @@ dependencies {
     implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.8.4'
     implementation 'androidx.datastore:datastore-preferences:1.1.1'
     implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1'
+    implementation 'androidx.core:core-ktx:1.13.1'
     // libsu for robust root shell
-    implementation 'com.github.topjohnwu.libsu:core:5.2.2'
-    implementation 'com.github.topjohnwu.libsu:io:5.2.2'
+    implementation 'com.github.topjohnwu.libsu:core:5.2.2' // io 功能未使用，移除以减小 dex
 }

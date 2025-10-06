@@ -5,8 +5,13 @@
 -keep class com.override.battcaplsp.SettingsHook { *; }
 -keep class com.override.battcaplsp.SettingsProvider { *; }
 
-# 保留 Compose 相关
--keep class androidx.compose.** { *; }
+# Compose: 仅保留可能通过反射/生成访问的 Composable 类成员注解元数据
+# 避免全量 keep 以便 R8 剔除未使用 UI 组合
+-keepclassmembers class * {
+    @androidx.compose.runtime.Composable <methods>;
+}
+# 保留生成的 Compose Compiler runtime 内部（必要核心）
+-keep class androidx.compose.runtime.** { *; }
 -dontwarn androidx.compose.**
 
 # 保留 DataStore 相关
@@ -16,10 +21,7 @@
 # 保留 libsu 相关
 -keep class com.topjohnwu.superuser.** { *; }
 
-# 保留反射调用的类和方法
--keepclassmembers class * {
-    @androidx.compose.runtime.Composable <methods>;
-}
+# 其余反射保留已由上方规则覆盖
 
 # 保留枚举
 -keepclassmembers enum * {

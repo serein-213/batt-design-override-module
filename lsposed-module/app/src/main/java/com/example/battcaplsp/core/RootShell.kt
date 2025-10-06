@@ -166,7 +166,7 @@ object RootShell {
                 "Root权限验证成功"
             }
             
-            RootStatus(true, "✅ Root 权限已获取\n$info")
+            RootStatus(true, "SUCCESS:Root 权限已获取\n$info")
         } catch (t: Throwable) {
             RootStatus(false, "Root 权限检查异常: ${t.message}")
         }

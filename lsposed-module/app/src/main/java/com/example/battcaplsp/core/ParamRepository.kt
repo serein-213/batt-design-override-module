@@ -7,6 +7,9 @@ import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.runBlocking
 
@@ -36,10 +39,23 @@ data class UiState(
 )
 
 class ParamRepository(private val ctx: Context, private val moduleManager: ModuleManager) {
-    val flow: Flow<UiState> = ctx.dataStore.data.map { p -> 
-        // 使用runBlocking来处理suspend调用，但这不是最佳实践
-        // 更好的方法是重构整个流程为suspend
+    // 内部：DataStore 基础流
+    private val prefsFlow: Flow<UiState> = ctx.dataStore.data.map { p ->
         runBlocking { toStateAsync(p) }
+    }
+
+    // 模块加载状态独立可刷新流
+    private val _loaded = MutableStateFlow(false)
+    val loaded: StateFlow<Boolean> get() = _loaded
+
+    // 合并为公开 UI 状态：DataStore 值 + 最新加载状态
+    val flow: Flow<UiState> = combine(prefsFlow, _loaded) { base, liveLoaded ->
+        base.copy(moduleLoaded = liveLoaded)
+    }
+
+    suspend fun refresh() {
+        // 主动检测模块是否加载并推送
+        _loaded.emit(moduleManager.isLoaded())
     }
 
     private suspend fun toStateAsync(p: Preferences): UiState = UiState(
@@ -76,5 +92,7 @@ class ParamRepository(private val ctx: Context, private val moduleManager: Modul
             p[Keys.verbose] = if (n.verbose) 1 else 0
             p[Keys.koPath] = n.koPath
         }
+        // 更新持久化后尝试刷新加载状态（不会显著阻塞）
+        runBlocking { refresh() }
     }
 }

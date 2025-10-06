@@ -3,8 +3,11 @@
 
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- 允许应用内发起未知来源安装（Android 8+ 自更新需要） -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <application
+        android:name=".App"
         android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher"
@@ -48,6 +51,16 @@
             android:authorities="com.override.battcaplsp.provider"
             android:exported="true"
             android:grantUriPermissions="true" />
+        <!-- FileProvider 用于暴露下载的 APK (content://) 避免 FileUriExposedException -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="com.override.battcaplsp.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
         <meta-data
             android:name="xposedmodule"
             android:value="true" />

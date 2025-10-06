@@ -207,4 +207,48 @@ class GitHubReleaseClient {
             0
         }
     }
+
+    /**
+     * 获取最近几个 Release 中的所有 .ko 资产（按时间倒序，去重文件名，最多 limit 个）
+     */
+    suspend fun listLatestKoAssets(limit: Int = 15): List<KoAsset> = withContext(Dispatchers.IO) {
+        val result = mutableListOf<KoAsset>()
+        val seen = HashSet<String>()
+        try {
+            val url = URL("$GITHUB_API_BASE/repos/$REPO_OWNER/$REPO_NAME/releases")
+            val conn = url.openConnection() as HttpURLConnection
+            conn.requestMethod = "GET"
+            conn.setRequestProperty("Accept", "application/vnd.github.v3+json")
+            conn.setRequestProperty("User-Agent", "BatteryOverrideManager/1.0")
+            if (conn.responseCode != HttpURLConnection.HTTP_OK) return@withContext emptyList()
+            val text = conn.inputStream.bufferedReader().readText()
+            val arr = org.json.JSONArray(text)
+            for (i in 0 until arr.length()) {
+                if (result.size >= limit) break
+                val rel = arr.getJSONObject(i)
+                val tagName = rel.optString("tag_name")
+                val assets = rel.optJSONArray("assets") ?: continue
+                for (j in 0 until assets.length()) {
+                    if (result.size >= limit) break
+                    val asset = assets.getJSONObject(j)
+                    val name = asset.optString("name")
+                    if (!name.endsWith(".ko")) continue
+                    if (!seen.add(name)) continue
+                    val dl = asset.optString("browser_download_url")
+                    val size = asset.optInt("size", -1)
+                    result += KoAsset(name = name, downloadUrl = dl, sizeBytes = size, tag = tagName)
+                }
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("GitHubReleaseClient", "listLatestKoAssets failed", e)
+        }
+        result
+    }
+
+    data class KoAsset(
+        val name: String,
+        val downloadUrl: String,
+        val sizeBytes: Int,
+        val tag: String
+    )
 }

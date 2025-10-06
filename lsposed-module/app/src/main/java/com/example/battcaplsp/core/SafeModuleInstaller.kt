@@ -95,15 +95,23 @@ class SafeModuleInstaller(private val context: Context) {
             // 7. 检查模块状态
             val dmesgOutput = getRecentKernelLog() // 单次获取
             
-            // 8. 检查是否有错误信息
-            if (dmesgOutput.contains("error", ignoreCase = true) || 
-                dmesgOutput.contains("failed", ignoreCase = true) ||
-                dmesgOutput.contains("panic", ignoreCase = true)) {
-                return@withContext TestResult(
-                    passed = false,
-                    message = "内核日志中发现错误信息",
-                    dmesgTail = dmesgOutput
-                )
+            // 8. 检查是否有与当前模块直接关联的错误信息
+            // 只在同一行同时包含 模块名 + 关键字(error/failed/panic) 时判定失败
+            run {
+                val moduleNameLower = moduleName.lowercase()
+                val errorKeywords = listOf("error", "failed", "panic")
+                val hitLines = dmesgOutput.lineSequence().filter { line ->
+                    val lower = line.lowercase()
+                    if (!lower.contains(moduleNameLower)) return@filter false
+                    errorKeywords.any { kw -> lower.contains(kw) }
+                }.toList()
+                if (hitLines.isNotEmpty()) {
+                    return@withContext TestResult(
+                        passed = false,
+                        message = "内核日志中发现与模块相关错误信息",
+                        dmesgTail = (hitLines + "---- FULL TAIL ----" + dmesgOutput).joinToString("\n")
+                    )
+                }
             }
             
             logD("SafeModuleInstaller", "模块测试通过")

@@ -29,16 +29,58 @@ MAJOR_MINOR=$(echo "$BASE_VER" | cut -d. -f1,2)
 
 log "检测到内核版本: $KREL (主版本: $MAJOR_MINOR)"
 
-# 查找可用的 .ko 文件（按优先级排序）
-KO_CANDIDATES="batt_design_override-${MAJOR_MINOR}.ko batt_design_override-${MAJOR_MINOR%.*}.ko batt_design_override.ko"
+# 查找可用的 .ko 文件（按优先级排序，完全匹配优先）
+ANDROID_VERSIONS="android11 android12 android13 android14 android15"
 KO_SELECTED=""
 
-for f in $KO_CANDIDATES; do
-    if [ -f "$COMM_DIR/$f" ]; then 
-        KO_SELECTED="$COMM_DIR/$f"
+# 优先级1: 完全匹配 android版本+完整内核版本
+for android_ver in $ANDROID_VERSIONS; do
+    ko_file="$COMM_DIR/batt_design_override-${android_ver}-${KREL}.ko"
+    if [ -f "$ko_file" ]; then
+        KO_SELECTED="$ko_file"
+        log "找到完全匹配的模块 (android+完整版本): $(basename "$KO_SELECTED")"
         break
     fi
 done
+
+# 优先级2: 完全匹配 android版本+主次版本
+if [ -z "$KO_SELECTED" ]; then
+    for android_ver in $ANDROID_VERSIONS; do
+        ko_file="$COMM_DIR/batt_design_override-${android_ver}-${MAJOR_MINOR}.ko"
+        if [ -f "$ko_file" ]; then
+            KO_SELECTED="$ko_file"
+            log "找到完全匹配的模块 (android+主次版本): $(basename "$KO_SELECTED")"
+            break
+        fi
+    done
+fi
+
+# 优先级3: 简化匹配 完整内核版本
+if [ -z "$KO_SELECTED" ]; then
+    ko_file="$COMM_DIR/batt_design_override-${KREL}.ko"
+    if [ -f "$ko_file" ]; then
+        KO_SELECTED="$ko_file"
+        log "找到匹配的模块 (完整版本): $(basename "$KO_SELECTED")"
+    fi
+fi
+
+# 优先级4: 简化匹配 主次版本
+if [ -z "$KO_SELECTED" ]; then
+    ko_file="$COMM_DIR/batt_design_override-${MAJOR_MINOR}.ko"
+    if [ -f "$ko_file" ]; then
+        KO_SELECTED="$ko_file"
+        log "找到匹配的模块 (主次版本): $(basename "$KO_SELECTED")"
+    fi
+fi
+
+# 优先级5: 通用匹配
+if [ -z "$KO_SELECTED" ]; then
+    ko_file="$COMM_DIR/batt_design_override.ko"
+    if [ -f "$ko_file" ]; then
+        KO_SELECTED="$ko_file"
+        log "找到通用模块: $(basename "$KO_SELECTED")"
+    fi
+fi
 
 if [ -z "$KO_SELECTED" ]; then
     log "未找到匹配的内核模块，尝试通知应用下载"

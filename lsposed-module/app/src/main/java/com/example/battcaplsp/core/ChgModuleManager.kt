@@ -61,11 +61,28 @@ class ChgModuleManager(
 
     /** Batch write k=v lines to /proc/chg_param_override. Empty values are skipped. */
     suspend fun applyBatch(params: Map<String, String?>): RootShell.ExecResult = withContext(Dispatchers.IO) {
-        val lines = params.entries
+        fun sanitize(raw: String): String = raw
+            .replace("\r", " ")
+            .replace("\n", " ")          // 真换行
+            .replace("\\n", " ")         // 字面 \n
+            .replace(Regex("\u0000"), " ")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+            .take(120)
+
+        val cleaned = params.entries
             .filter { !it.value.isNullOrBlank() }
-            .joinToString("\\n") { "${it.key}=${it.value!!.trim()}" }
-        if (lines.isBlank()) return@withContext RootShell.exec(":")
-        RootShell.exec("printf %s "+RootShell.shellArg(lines)+" | tee "+procPath)
+            .associate { it.key to sanitize(it.value!!) }
+            .filter { it.value.isNotBlank() }
+
+        if (cleaned.isEmpty()) return@withContext RootShell.exec(":")
+
+        val builder = buildString {
+            cleaned.forEach { (k,v) -> append(k).append('=').append(v).append('\n') }
+        }
+        // 确保末尾有换行，便于内核逐行解析
+        val payload = if (builder.endsWith("\n")) builder else builder + "\n"
+        RootShell.exec("printf %s "+RootShell.shellArg(payload)+" | tee "+procPath)
     }
 
     suspend fun load(koPath: String, targetBatt: String?, targetUsb: String?, verbose: Boolean): RootShell.ExecResult {
@@ -222,24 +239,28 @@ class ChgModuleManager(
         val r = RootShell.exec("cat "+procPath+" 2>/dev/null || true")
         if (r.code != 0 || r.out.isBlank()) return@withContext emptyMap()
         val map = mutableMapOf<String, String>()
-        r.out.lineSequence().forEach { line ->
-            val ln = line.trim()
+        val lines = r.out.split('\n')
+        lines.forEach { rawLine ->
+            val ln = rawLine.trim()
             if (ln.isEmpty()) return@forEach
-            if (ln.contains('=') && !ln.contains(' ')) {
-                val idx = ln.indexOf('=')
-                if (idx > 0) {
-                    val k = ln.substring(0, idx)
-                    val v = ln.substring(idx + 1)
-                    map[k] = v
+            if (ln.startsWith("batt=") && ln.contains(" usb=")) {
+                ln.split(' ').forEach { token ->
+                    val idx = token.indexOf('=')
+                    if (idx > 0) map[token.substring(0, idx)] = token.substring(idx + 1)
                 }
-            } else if (ln.startsWith("batt=") && ln.contains(" usb=")) {
-                // First line: batt=... usb=...
-                val parts = ln.split(' ')
-                parts.forEach {
-                    val p = it.trim()
-                    val idx = p.indexOf('=')
-                    if (idx > 0) map[p.substring(0, idx)] = p.substring(idx + 1)
+                return@forEach
+            }
+            val idx = ln.indexOf('=')
+            if (idx > 0) {
+                val k = ln.substring(0, idx)
+                var v = ln.substring(idx + 1)
+                // 如果值里仍然混入其它行（异常情况），截断到第一个换行或出现第二个 key 样式片段前
+                val secondKeyMatch = Regex("\\b(voltage_max|ccc|term|icl|charge_limit|auto_reapply)=").find(v)
+                if (secondKeyMatch != null) {
+                    v = v.substring(0, secondKeyMatch.range.first).trim()
                 }
+                v = v.replace("\r", " ").replace('\u0000', ' ').replace(Regex("\\s+"), " ").trim()
+                map[k] = v
             }
         }
         return@withContext map

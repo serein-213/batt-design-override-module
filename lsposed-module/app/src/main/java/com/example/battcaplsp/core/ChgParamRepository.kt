@@ -8,6 +8,9 @@ import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.runBlocking
 
@@ -42,10 +45,14 @@ data class ChgUiState(
 )
 
 class ChgParamRepository(private val ctx: Context, private val mgr: ChgModuleManager) {
-    val flow: Flow<ChgUiState> = ctx.chgStore.data.map { 
-        // 使用runBlocking来处理suspend调用
+    private val prefsFlow: Flow<ChgUiState> = ctx.chgStore.data.map {
         runBlocking { toStateAsync(it) }
     }
+    private val _loaded = MutableStateFlow(false)
+    val loaded: StateFlow<Boolean> get() = _loaded
+    val flow: Flow<ChgUiState> = combine(prefsFlow, _loaded) { base, live -> base.copy(loaded = live) }
+
+    suspend fun refresh() { _loaded.emit(mgr.isLoaded()) }
 
     private suspend fun toStateAsync(p: Preferences): ChgUiState = ChgUiState(
         koPath = p[ChgKeys.koPath] ?: "/data/adb/modules/batt-design-override/common/chg_param_override.ko",
@@ -56,7 +63,8 @@ class ChgParamRepository(private val ctx: Context, private val mgr: ChgModuleMan
         term = p[ChgKeys.term] ?: 0,
         icl = p[ChgKeys.icl] ?: 0,
         chargeLimit = p[ChgKeys.chargeLimit] ?: 0,
-        verbose = (p[ChgKeys.verbose] ?: 1) == 1,
+    // 默认值改为 0（之前为 1 导致未设置时 UI 误认为开启并写回1）
+    verbose = (p[ChgKeys.verbose] ?: 0) == 1,
         pdDesired = p[ChgKeys.pdDesired] ?: 1,
         loaded = mgr.isLoaded()
     )
@@ -70,7 +78,8 @@ class ChgParamRepository(private val ctx: Context, private val mgr: ChgModuleMan
         term = p[ChgKeys.term] ?: 0,
         icl = p[ChgKeys.icl] ?: 0,
         chargeLimit = p[ChgKeys.chargeLimit] ?: 0,
-        verbose = (p[ChgKeys.verbose] ?: 1) == 1,
+    // 同上：保持与 toStateAsync 一致
+    verbose = (p[ChgKeys.verbose] ?: 0) == 1,
         pdDesired = p[ChgKeys.pdDesired] ?: 1,
         loaded = false  // 在非suspend上下文中默认为false
     )
@@ -89,6 +98,7 @@ class ChgParamRepository(private val ctx: Context, private val mgr: ChgModuleMan
             p[ChgKeys.verbose] = if (n.verbose) 1 else 0
             p[ChgKeys.pdDesired] = n.pdDesired
         }
+        runBlocking { refresh() }
     }
 }
 

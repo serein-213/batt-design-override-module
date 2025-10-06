@@ -92,6 +92,58 @@ class KernelModuleDownloader(private val context: Context) {
     
     /** 获取最新的 GitHub Release 信息（带 UA 与重试） */
     suspend fun getLatestRelease(): GitHubRelease? = withContext(Dispatchers.IO) {
+        return@withContext getAllReleases().firstOrNull()
+    }
+    
+    /** 获取所有 GitHub Releases 信息（最新优先，支持回退查找） */
+    suspend fun getAllReleases(): List<GitHubRelease> = withContext(Dispatchers.IO) {
+        val ua = "battcaplsp-app/1.0 (+https://github.com/serein-213)"
+        val maxRetries = 3
+        var lastError: Exception? = null
+        
+        repeat(maxRetries) { attempt ->
+            try {
+                val url = URL("$GITHUB_API_BASE/releases")  // 获取所有releases而不仅仅是latest
+                val connection = url.openConnection() as HttpURLConnection
+                connection.connectTimeout = 12000
+                connection.readTimeout = 15000
+                connection.setRequestProperty("Accept", "application/vnd.github.v3+json")
+                connection.setRequestProperty("User-Agent", ua)
+                
+                val code = connection.responseCode
+                if (code != HttpURLConnection.HTTP_OK) {
+                    lastError = RuntimeException("HTTP $code")
+                    android.util.Log.w("KernelModuleDownloader", "HTTP $code on attempt ${attempt + 1}")
+                } else {
+                    val response = connection.inputStream.bufferedReader().readText()
+                    android.util.Log.d("KernelModuleDownloader", "Response length: ${response.length}")
+                    
+                    // 解析所有releases
+                    val releases = parseAllGitHubReleases(response)
+                    if (releases.isNotEmpty()) {
+                        android.util.Log.d("KernelModuleDownloader", "Found ${releases.size} releases")
+                        return@withContext releases
+                    } else {
+                        // 如果解析失败，回退到latest
+                        android.util.Log.w("KernelModuleDownloader", "Failed to parse releases, falling back to latest")
+                        val latestRelease = getLatestReleaseOnly()
+                        return@withContext if (latestRelease != null) listOf(latestRelease) else emptyList()
+                    }
+                }
+            } catch (e: Exception) {
+                lastError = e
+                android.util.Log.e("KernelModuleDownloader", "Attempt ${attempt + 1} failed", e)
+            }
+            // 简单退避
+            try { Thread.sleep((800L * (attempt + 1))) } catch (_: Throwable) {}
+        }
+        
+        android.util.Log.e("KernelModuleDownloader", "All attempts failed", lastError)
+        return@withContext emptyList()
+    }
+    
+    /** 仅获取最新release（原有逻辑保留作为回退） */
+    private suspend fun getLatestReleaseOnly(): GitHubRelease? = withContext(Dispatchers.IO) {
         val ua = "battcaplsp-app/1.0 (+https://github.com/serein-213)"
         val maxRetries = 3
         var lastError: Exception? = null
@@ -141,6 +193,66 @@ class KernelModuleDownloader(private val context: Context) {
         }
         android.util.Log.e("KernelModuleDownloader", "All attempts failed", lastError)
         null
+    }
+    
+    /** 解析所有 GitHub Releases 的 API 响应 */
+    private fun parseAllGitHubReleases(jsonResponse: String): List<GitHubRelease> {
+        try {
+            val releases = mutableListOf<GitHubRelease>()
+            
+            // 更简单的方法：查找所有 tag_name 和对应的 assets
+            val tagNamePattern = Regex("\"tag_name\"\\s*:\\s*\"([^\"]+)\"")
+            val namePattern = Regex("\"name\"\\s*:\\s*\"([^\"]+)\"")
+            
+            // 分割成release段落，通过查找 "tag_name" 开始的位置
+            val tagMatches = tagNamePattern.findAll(jsonResponse).toList()
+            val nameMatches = namePattern.findAll(jsonResponse).toList()
+            
+            android.util.Log.d("KernelModuleDownloader", "Found ${tagMatches.size} tag_name matches")
+            
+            for (i in tagMatches.indices) {
+                val tagName = tagMatches[i].groupValues[1]
+                
+                // 找到对应的release name（通常紧跟在tag_name后面）
+                val releaseStartPos = tagMatches[i].range.first
+                val releaseEndPos = if (i < tagMatches.size - 1) tagMatches[i + 1].range.first else jsonResponse.length
+                val releaseSection = jsonResponse.substring(releaseStartPos, releaseEndPos)
+                
+                val releaseName = namePattern.find(releaseSection)?.groupValues?.getOrNull(1) ?: tagName
+                
+                // 在这个release段落中查找assets
+                val assets = mutableListOf<GitHubAsset>()
+                val assetNamePattern = Regex("\"name\"\\s*:\\s*\"([^\"]+\\.ko)\"")
+                val downloadUrlPattern = Regex("\"browser_download_url\"\\s*:\\s*\"([^\"]+)\"")
+                val sizePattern = Regex("\"size\"\\s*:\\s*(\\d+)")
+                
+                val assetNames = assetNamePattern.findAll(releaseSection).map { it.groupValues[1] }.toList()
+                val downloadUrls = downloadUrlPattern.findAll(releaseSection).map { it.groupValues[1] }.toList()
+                val sizes = sizePattern.findAll(releaseSection).map { it.groupValues[1].toLongOrNull() ?: 0L }.toList()
+                
+                // 匹配 .ko 文件的 assets
+                for (j in assetNames.indices) {
+                    val assetName = assetNames[j]
+                    if (assetName.endsWith(".ko") && j < downloadUrls.size) {
+                        val downloadUrl = downloadUrls.find { url -> url.contains(assetName) } ?: continue
+                        val size = if (j < sizes.size) sizes[j] else 0L
+                        assets.add(GitHubAsset(assetName, downloadUrl, size))
+                    }
+                }
+                
+                if (assets.isNotEmpty()) {
+                    releases.add(GitHubRelease(tagName, releaseName, assets))
+                    android.util.Log.d("KernelModuleDownloader", "Parsed release $tagName with ${assets.size} .ko assets")
+                }
+            }
+            
+            android.util.Log.d("KernelModuleDownloader", "Successfully parsed ${releases.size} releases")
+            return releases
+            
+        } catch (e: Exception) {
+            android.util.Log.e("KernelModuleDownloader", "Error parsing all GitHub releases JSON: ${e.message}", e)
+            return emptyList()
+        }
     }
     
     /** 解析 GitHub API 响应 */
@@ -201,38 +313,75 @@ class KernelModuleDownloader(private val context: Context) {
         val androidVersion: String
     )
     
-    /** 根据内核版本获取可用的模块列表（仅按内核版本匹配，安卓段可选） */
+    /** 根据内核版本获取可用的模块列表（支持多个release回退查找） */
     suspend fun getAvailableModules(kernelVersion: ModuleManager.KernelVersion): List<ModuleInfo> = withContext(Dispatchers.IO) {
         val modules = mutableListOf<ModuleInfo>()
         
         try {
-            // 获取最新的 Release
-            val release = getLatestRelease() ?: return@withContext emptyList()
+            // 获取所有 Releases（按新到旧排序）
+            val releases = getAllReleases()
+            if (releases.isEmpty()) {
+                android.util.Log.w("KernelModuleDownloader", "No releases found")
+                return@withContext emptyList()
+            }
             
             // 查找支持的内核版本
             val supportedVersion = findSupportedKernelVersion(kernelVersion.majorMinor)
             if (supportedVersion == null) {
+                android.util.Log.w("KernelModuleDownloader", "No supported kernel version found for ${kernelVersion.majorMinor}")
                 return@withContext emptyList()
             }
             
             val androidVersion = KERNEL_TO_ANDROID[supportedVersion] // 仅用于信息展示
 
-            // 遍历已知模块名，查找匹配的 assets（允许补丁版本号，android 段可选）
+            // 遍历已知模块名
             MODULE_NAMES.forEach { moduleName ->
-                android.util.Log.d("KernelModuleDownloader", "Looking for file of $moduleName with kernel $supportedVersion (android segment optional)")
+                android.util.Log.d("KernelModuleDownloader", "Looking for file of $moduleName with kernel $supportedVersion")
 
-                val matchingAsset = release.assets.find { asset ->
-                    android.util.Log.d("KernelModuleDownloader", "Checking asset: ${asset.name}")
-                    matchesAssetName(asset.name, moduleName, supportedVersion)
+                // 定义查找优先级（不包含通用匹配）
+                val searchPatterns = listOf(
+                    // 1. 完全匹配：包含android版本和完整内核版本
+                    "$moduleName-${androidVersion ?: "android\\d+"}-${kernelVersion.full}\\.ko",
+                    // 2. 完全匹配：包含android版本和主次版本
+                    "$moduleName-${androidVersion ?: "android\\d+"}-${supportedVersion}\\.ko",
+                    // 3. 简化匹配：完整内核版本
+                    "$moduleName-${kernelVersion.full}\\.ko",
+                    // 4. 简化匹配：主次版本
+                    "$moduleName-${supportedVersion}\\.ko"
+                )
+
+                var matchingAsset: GitHubAsset? = null
+                var matchedPattern = ""
+                var foundInRelease = ""
+
+                // 在所有releases中按优先级顺序查找
+                releaseLoop@ for (release in releases) {
+                    android.util.Log.d("KernelModuleDownloader", "Checking release: ${release.tagName}")
+                    
+                    for (pattern in searchPatterns) {
+                        val regex = Regex("^$pattern$")
+                        matchingAsset = release.assets.find { asset ->
+                            val matches = regex.matches(asset.name)
+                            if (matches) {
+                                android.util.Log.d("KernelModuleDownloader", "Asset ${asset.name} matches pattern: $pattern in release ${release.tagName}")
+                            }
+                            matches
+                        }
+                        if (matchingAsset != null) {
+                            matchedPattern = pattern
+                            foundInRelease = release.tagName
+                            break@releaseLoop
+                        }
+                    }
                 }
 
                 if (matchingAsset != null) {
-                    android.util.Log.d("KernelModuleDownloader", "Found matching asset: ${matchingAsset.name}")
+                    android.util.Log.d("KernelModuleDownloader", "Found matching asset: ${matchingAsset.name} (pattern: $matchedPattern, release: $foundInRelease)")
                     val actualKernel = extractKernelFromAssetName(matchingAsset.name) ?: supportedVersion
                     modules.add(
                         ModuleInfo(
                             name = moduleName,
-                            version = release.tagName,
+                            version = foundInRelease,
                             downloadUrl = matchingAsset.downloadUrl,
                             sha256 = matchingAsset.sha256,
                             size = matchingAsset.size,
@@ -241,11 +390,12 @@ class KernelModuleDownloader(private val context: Context) {
                         )
                     )
                 } else {
-                    android.util.Log.w("KernelModuleDownloader", "No matching asset found for: $moduleName kernel $supportedVersion (android segment optional)")
+                    android.util.Log.w("KernelModuleDownloader", "No matching asset found for: $moduleName kernel $supportedVersion across ${releases.size} releases")
                 }
             }
             
         } catch (e: Exception) {
+            android.util.Log.e("KernelModuleDownloader", "Error in getAvailableModules", e)
             // 如果获取失败，返回空列表
         }
         
@@ -299,6 +449,10 @@ class KernelModuleDownloader(private val context: Context) {
             // 使用与 GitHub 文件名相同的命名格式
             val originalFileName = moduleInfo.downloadUrl.substringAfterLast("/")
             val localFile = File(storageDir, originalFileName)
+            // 覆盖策略: 若已存在同名文件先删除，确保重新下载（符合“不要使用本地缓存”需求）
+            if (localFile.exists()) {
+                runCatching { localFile.delete() }
+            }
             
             connection.inputStream.use { input ->
                 FileOutputStream(localFile).use { output ->
@@ -344,6 +498,10 @@ class KernelModuleDownloader(private val context: Context) {
             )
         }
     }
+
+    /** 强制下载（语义化包装，便于调用方表达 intent），内部直接调用 downloadModule */
+    suspend fun forceRedownload(moduleInfo: ModuleInfo, onProgress: ((Int) -> Unit)? = null): DownloadResult =
+        downloadModule(moduleInfo, onProgress)
     
     /** 计算文件 SHA256 */
     private fun calculateSHA256(file: File): String {
@@ -358,24 +516,46 @@ class KernelModuleDownloader(private val context: Context) {
         return digest.digest().joinToString("") { "%02x".format(it) }
     }
     
-    /** 检查本地是否已有对应版本的模块 */
+    /** 检查本地是否已有对应版本的模块（按精确匹配优先级排序） */
     fun getLocalModule(moduleName: String, version: String, kernelVersion: String): File? {
         val storageDir = getModuleStorageDir()
         
-        // 尝试多种可能的文件名格式
+        // 尝试获取当前内核信息以进行精确匹配
+        val currentKernel = try {
+            java.io.File("/proc/sys/kernel/osrelease").readText().trim()
+        } catch (e: Exception) {
+            kernelVersion
+        }
+        
+        val majorMinor = currentKernel.split('.').take(2).joinToString(".")
+        val androidVersion = KERNEL_TO_ANDROID[majorMinor]
+        
+        // 按优先级排序的可能文件名（与下载逻辑保持一致）
         val possibleNames = listOf(
-            "$moduleName-$version-$kernelVersion.ko",  // 新格式：batt_design_override-1.2.1-5.15.ko
-            "$moduleName-$kernelVersion.ko",           // 简化格式：batt_design_override-5.15.ko
-            "$moduleName.ko"                           // 通用格式：batt_design_override.ko
-        )
+            // 1. 完全匹配：包含android版本和完整内核版本
+            "$moduleName-$androidVersion-$currentKernel.ko",
+            // 2. 完全匹配：包含android版本和主次版本  
+            "$moduleName-$androidVersion-$majorMinor.ko",
+            // 3. 简化匹配：完整内核版本
+            "$moduleName-$currentKernel.ko",
+            // 4. 简化匹配：主次版本
+            "$moduleName-$majorMinor.ko",
+            // 5. 通用匹配
+            "$moduleName.ko",
+            // 6. 兼容旧格式：带版本号的格式
+            "$moduleName-$version-$kernelVersion.ko",
+            "$moduleName-$version-$majorMinor.ko"
+        ).distinct() // 去重
         
         for (fileName in possibleNames) {
             val localFile = File(storageDir, fileName)
             if (localFile.exists() && localFile.length() > 0) {
+                android.util.Log.d("KernelModuleDownloader", "Found local module: $fileName")
                 return localFile
             }
         }
         
+        android.util.Log.d("KernelModuleDownloader", "No local module found for $moduleName")
         return null
     }
     

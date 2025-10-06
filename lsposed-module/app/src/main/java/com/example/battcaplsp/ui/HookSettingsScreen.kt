@@ -16,12 +16,19 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material.icons.filled.Info
+// Icons.Filled.Terminal 需要 material-icons-extended，这里不引入扩展包以减小体积，改用 Warning 图标占位
+// import androidx.compose.material.icons.filled.Terminal
 import com.override.battcaplsp.core.HookSettingsRepository
 import com.override.battcaplsp.core.HookSettingsState
 import com.override.battcaplsp.core.RootShell
 import com.override.battcaplsp.core.ModuleManager
 import com.override.battcaplsp.core.ChgModuleManager
 import kotlinx.coroutines.launch
+import com.override.battcaplsp.core.OpEvents
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.withContext
 import java.io.File
 
 // 提取vermagic中的内核版本号（如从"5.15.192-g12345678 SMP preempt mod_unload aarch64"提取"5.15.192"）
@@ -32,6 +39,26 @@ private fun extractKernelVersionFromVermagic(vermagic: String): String {
     val versionRegex = Regex("""(\d+\.\d+\.\d+)""")
     val match = versionRegex.find(vermagic)
     return match?.value ?: ""
+}
+
+// 统一状态展示组件（代替 emoji）顶层定义，避免本地 enum 编译限制
+private enum class StatusType { SUCCESS, ERROR, WARN, INFO, UPDATE }
+
+@Composable
+private fun StatusLine(type: StatusType, text: String) {
+    val (icon, tint) = when (type) {
+        StatusType.SUCCESS -> Icons.Default.CheckCircle to MaterialTheme.colorScheme.primary.copy(alpha = 0.70f)
+        // 没有 material.icons.filled.Error 基础图标，使用 Warning 图标代替错误态
+        StatusType.ERROR -> Icons.Default.Warning to MaterialTheme.colorScheme.error.copy(alpha = 0.85f)
+        StatusType.WARN -> Icons.Default.Warning to MaterialTheme.colorScheme.tertiary.copy(alpha = 0.85f)
+        StatusType.INFO -> Icons.Default.Info to MaterialTheme.colorScheme.primary.copy(alpha = 0.65f)
+        StatusType.UPDATE -> Icons.Default.Info to MaterialTheme.colorScheme.primary.copy(alpha = 0.85f)
+    }
+    Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically, modifier = Modifier.padding(vertical = 2.dp)) {
+        Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(14.dp))
+        Spacer(Modifier.width(4.dp))
+        Text(text, style = MaterialTheme.typography.bodySmall, color = tint)
+    }
 }
 
 @Composable
@@ -76,6 +103,9 @@ fun HookSettingsScreen(repo: HookSettingsRepository) {
     var showUpdateDialog by remember { mutableStateOf(false) }
     var downloadingApk by remember { mutableStateOf(false) }
     var apkDownloadProgress by remember { mutableStateOf(0) }
+    var apkDownloadId by remember { mutableStateOf<Long?>(null) }
+    var apkLocalPath by remember { mutableStateOf<String?>(null) }
+    var apkPhase by remember { mutableStateOf("idle") } // idle | downloading | ready | installing | done | error
     val apkDownloadManager = remember { com.override.battcaplsp.core.ApkDownloadManager(context) }
     
     // 检测是否为小米设备
@@ -90,112 +120,80 @@ fun HookSettingsScreen(repo: HookSettingsRepository) {
         }
     }
     
+    // 状态刷新缓存与并行优化
     var lastStatusLoadTime by remember { mutableStateOf(0L) }
     val statusTtlMs = 5000L
+    // availableModules 缓存更长一点（因为很少变化）
+    var lastModulesFetchTime by remember { mutableStateOf(0L) }
+    val modulesTtlMs = 60000L
+    var cachedModules by remember { mutableStateOf<List<com.override.battcaplsp.core.KernelModuleDownloader.ModuleInfo>>(emptyList()) }
+
     suspend fun loadStatus(force: Boolean = false) {
         val now = System.currentTimeMillis()
-        if (!force && !initialLoading && (now - lastStatusLoadTime) < statusTtlMs) {
-            return
-        }
-        // 聚合加载，局部变量暂存，最后一次性赋值，减少 Compose 多次重组引发的闪烁
-        val newRoot = RootShell.getRootStatus(forceRefresh = true)
-        val newBattLoaded = battMgr.isLoaded()
-        val newChgLoaded = chgMgr.isLoaded()
-        val newMagiskAvail = magiskManager.isMagiskAvailable()
-        val newMagiskInstalled = magiskManager.isModuleInstalled()
-        var newKernelVersion: ModuleManager.KernelVersion? = null
-        var newKernelVersionStr = "未知"
-        var newKernelVersionDetailStr = ""
-        var newAvailableModules: List<com.override.battcaplsp.core.KernelModuleDownloader.ModuleInfo> = emptyList()
-        var newBattVersion = ""
-        var newChgVersion = ""
-        var newBattVermagic = ""
-        var newChgVermagic = ""
+        if (!force && !initialLoading && (now - lastStatusLoadTime) < statusTtlMs) return
 
-        try {
-            newKernelVersion = battMgr.getKernelVersion()
-            newKernelVersionStr = newKernelVersion?.majorMinor ?: "未知"
-            newKernelVersionDetailStr = newKernelVersion?.full?.split("-")?.take(2)?.joinToString("-") ?: ""
-            newKernelVersion?.let { kv ->
-                newAvailableModules = downloader.getAvailableModules(kv)
-            }
-            val kernelVersionFile = File("/proc/version")
-            if (kernelVersionFile.exists()) {
-                val versionText = kernelVersionFile.readText()
-                val versionMatch = Regex("Linux version ([0-9]+\\.[0-9]+\\.[0-9]+)").find(versionText)
-                val fullKernelVersion = versionMatch?.groupValues?.get(1) ?: "未知"
-                if (newKernelVersionStr == "未知") newKernelVersionStr = fullKernelVersion
-                if (newKernelVersionDetailStr.isBlank()) {
-                    val detailMatch = Regex("Linux version ([0-9]+\\.[0-9]+\\.[0-9]+-android[0-9]+)").find(versionText)
-                    val detail = detailMatch?.groupValues?.get(1)
-                    if (!detail.isNullOrBlank()) newKernelVersionDetailStr = detail
-                }
-            }
-        } catch (_: Throwable) { if (newKernelVersionStr == "未知") newKernelVersionStr = "获取失败" }
+        // 并行获取基础状态
+        kotlinx.coroutines.coroutineScope {
+            val rootDeferred = async { RootShell.getRootStatus(forceRefresh = true) }
+            val battLoadedDeferred = async { battMgr.isLoaded() }
+            val chgLoadedDeferred = async { chgMgr.isLoaded() }
+            val magiskAvailDeferred = async { magiskManager.isMagiskAvailable() }
+            val magiskInstalledDeferred = async { magiskManager.isModuleInstalled() }
+            val kernelVersionDeferred = async { runCatching { battMgr.getKernelVersion() }.getOrNull() }
 
-    suspend fun readVermagic(module: String, loaded: Boolean): Pair<String,String> {
-            var version = ""
-            var vermagic = ""
-            if (loaded) {
+            val newRoot = rootDeferred.await()
+            val newBattLoaded = battLoadedDeferred.await()
+            val newChgLoaded = chgLoadedDeferred.await()
+            val newMagiskAvail = magiskAvailDeferred.await()
+            val newMagiskInstalled = magiskInstalledDeferred.await()
+            val newKernelVersion = kernelVersionDeferred.await()
+
+            var newKernelVersionStr = newKernelVersion?.majorMinor ?: "未知"
+            var newKernelVersionDetailStr = newKernelVersion?.full?.split('-')?.take(2)?.joinToString("-") ?: ""
+
+            // 只在需要且缓存过期时获取 availableModules（依赖 kernelVersion）
+            val needFetchModules = (cachedModules.isEmpty() || (now - lastModulesFetchTime) > modulesTtlMs) && newKernelVersion != null
+            if (needFetchModules && newKernelVersion != null) {
+                val fetched = runCatching { downloader.getAvailableModules(newKernelVersion) }.getOrElse { emptyList() }
+                cachedModules = fetched
+                lastModulesFetchTime = now
+            }
+
+            // 仅当模块已加载时再去读 vermagic，避免大量无谓 root 调用
+            suspend fun readLoadedVermagic(module: String): String = withContext(kotlinx.coroutines.Dispatchers.IO) {
                 try {
-                    val versionFile = File("/sys/module/${module}/version")
-                    version = if (versionFile.exists()) versionFile.readText().trim() else {
-                        val res = RootShell.exec("modinfo ${module} | grep '^version:' | cut -d: -f2 | tr -d ' '")
-                        if (res.code == 0 && res.out.isNotBlank()) res.out.trim() else "v1.0"
-                    }
-                    val sysFile = File("/sys/module/${module}/vermagic")
-                    vermagic = if (sysFile.exists()) sysFile.readText().trim() else {
-                        val vres = RootShell.exec("modinfo -F vermagic ${module} | head -1")
-                        if (vres.code == 0 && vres.out.isNotBlank()) vres.out.trim() else {
-                            val ko = battMgr.findAvailableKernelModule(module)
-                            if (ko != null) {
-                                val byModinfo = RootShell.exec("modinfo -F vermagic ${RootShell.shellArg(ko)} | head -1")
-                                if (byModinfo.code == 0 && byModinfo.out.isNotBlank()) byModinfo.out.trim() else {
-                                    val byStrings = RootShell.exec("strings ${RootShell.shellArg(ko)} | grep -m1 -o 'vermagic=[^\\n]*' | head -1 | sed 's/^vermagic=//'")
-                                    if (byStrings.code == 0 && byStrings.out.isNotBlank()) byStrings.out.trim() else "未知"
-                                }
-                            } else "未知"
-                        }
-                    }
-                } catch (_: Throwable) { version = "v1.0"; vermagic = "获取失败" }
-            } else {
-                // 未加载时尝试从文件获取 vermagic
-                try {
-                    val ko = battMgr.findAvailableKernelModule(module)
-                    if (ko != null) {
-                        val byModinfo = RootShell.exec("modinfo -F vermagic ${RootShell.shellArg(ko)} | head -1")
-                        vermagic = if (byModinfo.code == 0 && byModinfo.out.isNotBlank()) {
-                            byModinfo.out.trim()
-                        } else {
-                            val byStrings = RootShell.exec("strings ${RootShell.shellArg(ko)} | grep -m1 -o 'vermagic=[^\\n]*' | head -1 | sed 's/^vermagic=//'")
-                            if (byStrings.code == 0 && byStrings.out.isNotBlank()) byStrings.out.trim() else ""
-                        }
-                    }
+                    val sysFile = File("/sys/module/${'$'}module/vermagic")
+                    if (sysFile.exists()) return@withContext sysFile.readText().trim()
+                    val vres = RootShell.exec("modinfo -F vermagic ${'$'}module | head -1")
+                    if (vres.code == 0 && vres.out.isNotBlank()) return@withContext vres.out.trim() else ""
                 } catch (_: Throwable) { }
+                return@withContext ""
             }
-            return version to vermagic
+
+            val battVermagicDeferred = if (newBattLoaded == true) async { readLoadedVermagic("batt_design_override") } else null
+            val chgVermagicDeferred = if (newChgLoaded == true) async { readLoadedVermagic("chg_param_override") } else null
+
+            val newBattVermagic = battVermagicDeferred?.await().orEmpty()
+            val newChgVermagic = chgVermagicDeferred?.await().orEmpty()
+
+            // 一次性赋值到 Compose 状态
+            rootStatus = newRoot
+            battModuleLoaded = newBattLoaded
+            chgModuleLoaded = newChgLoaded
+            magiskAvailable = newMagiskAvail
+            magiskModuleInstalled = newMagiskInstalled
+            detectedKernelVersion = newKernelVersion
+            kernelVersion = newKernelVersionStr
+            kernelVersionDetail = newKernelVersionDetailStr
+            availableModules = cachedModules
+            // 版本号已不展示
+            battModuleVersion = ""
+            battModuleVermagic = newBattVermagic
+            chgModuleVersion = ""
+            chgModuleVermagic = newChgVermagic
+            initialLoading = false
+            lastStatusLoadTime = now
         }
-
-    val (bVersion, bVermagic) = readVermagic("batt_design_override", newBattLoaded)
-    val (cVersion, cVermagic) = readVermagic("chg_param_override", newChgLoaded)
-
-        // 一次性赋值
-        rootStatus = newRoot
-        battModuleLoaded = newBattLoaded
-        chgModuleLoaded = newChgLoaded
-        magiskAvailable = newMagiskAvail
-        magiskModuleInstalled = newMagiskInstalled
-        detectedKernelVersion = newKernelVersion
-        kernelVersion = newKernelVersionStr
-        kernelVersionDetail = newKernelVersionDetailStr
-        availableModules = newAvailableModules
-        battModuleVersion = if (newBattLoaded) bVersion else ""
-        battModuleVermagic = if (newBattLoaded) bVermagic else bVermagic // bVermagic 可能为空/信息
-    // 不再展示充电模块版本号，仍计算 cVersion 但不赋值可选: chgModuleVersion = ""
-    chgModuleVersion = ""
-        chgModuleVermagic = if (newChgLoaded) cVermagic else cVermagic
-        initialLoading = false
-        lastStatusLoadTime = now
     }
 
     LaunchedEffect(Unit) { loadStatus() }
@@ -209,6 +207,10 @@ fun HookSettingsScreen(repo: HookSettingsRepository) {
     var hookJsonMethods by remember { mutableStateOf(ui.hookJsonMethods) }
     var launcherIconEnabled by remember { mutableStateOf(true) }
     var msg by remember { mutableStateOf("") }
+    // 日志查看相关状态
+    var showLogDialog by remember { mutableStateOf(false) }
+    var logContent by remember { mutableStateOf<String?>(null) }
+    var loadingLog by remember { mutableStateOf(false) }
 
     // 当 ui 状态变化时，更新本地状态变量
     LaunchedEffect(ui) {
@@ -234,10 +236,12 @@ fun HookSettingsScreen(repo: HookSettingsRepository) {
                 }
             },
             icon = {
+                val successTint = MaterialTheme.colorScheme.primary.copy(alpha = 0.55f)
+                val warnTint = MaterialTheme.colorScheme.error.copy(alpha = 0.75f)
                 Icon(
                     if (rootStatus!!.available) Icons.Default.CheckCircle else Icons.Default.Warning,
                     contentDescription = null,
-                    tint = if (rootStatus!!.available) Color.Green else Color.Red
+                    tint = if (rootStatus!!.available) successTint else warnTint
                 )
             }
         )
@@ -289,17 +293,31 @@ fun HookSettingsScreen(repo: HookSettingsRepository) {
                         }
                     }
                 }
+                Spacer(Modifier.height(8.dp))
+                // 查看日志按钮
+                OutlinedButton(
+                    onClick = {
+                        showLogDialog = true
+                        loadingLog = true
+                        logContent = null
+                        scope.launch {
+                            logContent = com.override.battcaplsp.core.LogCollector.getRecentLogs(context, maxLines = 400)
+                            loadingLog = false
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(Icons.Default.Warning, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("查看日志")
+                }
                 
                 Spacer(Modifier.height(8.dp))
                 
                 // 显示当前版本和检查结果
                 versionCheckResult?.let { result ->
                     if (result.error != null) {
-                        Text(
-                            text = "❌ ${result.error}",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.error
-                        )
+                        StatusLine(type = StatusType.ERROR, text = result.error ?: "未知错误")
                     } else {
                         Text(
                             text = "当前版本: ${result.currentVersion}",
@@ -311,17 +329,9 @@ fun HookSettingsScreen(repo: HookSettingsRepository) {
                                 style = MaterialTheme.typography.bodySmall
                             )
                             if (result.hasUpdate) {
-                                Text(
-                                    text = "🆕 发现新版本！",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.primary
-                                )
+                                StatusLine(type = StatusType.UPDATE, text = "发现新版本")
                             } else {
-                                Text(
-                                    text = "✅ 已是最新版本",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.primary
-                                )
+                                StatusLine(type = StatusType.SUCCESS, text = "已是最新版本")
                             }
                         }
                     }
@@ -334,7 +344,8 @@ fun HookSettingsScreen(repo: HookSettingsRepository) {
                 }
             }
         }
-        
+
+        // 统一使用底部 LogViewerDialog，不再单独展示“日志工具”卡片
         Spacer(Modifier.height(8.dp))
         
         // 合并后的 模块状态与管理 卡片
@@ -360,21 +371,21 @@ fun HookSettingsScreen(repo: HookSettingsRepository) {
                     )
                 }
                 
+                // 统一行间距：与内核版本 / 电池模块保持一致 (1.dp)
                 Spacer(Modifier.height(1.dp))
-                
-                // 电池模块
+
+                // 电池模块行（仅图标与 vermagic，去除 root 权限误嵌内容）
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
                 ) {
                     Text("电池模块:")
-                    
                     Row(
                         verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        // vermagic 显示（仅显示内核版本号部分，如5.15.192）
+                        // vermagic 显示（仅显示内核版本号部分，如 5.15.192）
                         run {
                             val source = when {
                                 battModuleVermagic.isNotEmpty() && battModuleVermagic != "未知" && battModuleVermagic != "获取失败" -> {
@@ -382,7 +393,7 @@ fun HookSettingsScreen(repo: HookSettingsRepository) {
                                     extractKernelVersionFromVermagic(battModuleVermagic)
                                 }
                                 else -> {
-                                    android.util.Log.d("HookSettings", "No vermagic available")
+                                    android.util.Log.d("HookSettings", "No batt vermagic source available")
                                     ""
                                 }
                             }
@@ -395,28 +406,23 @@ fun HookSettingsScreen(repo: HookSettingsRepository) {
                                 )
                             }
                         }
-                        
-                        // 移除版本号显示
-                        
-                        // 状态图标和文字
+                        // 状态图标
                         Row(
                             verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(4.dp)
                         ) {
                             when (battModuleLoaded) {
-                                null -> {
-                                    CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
-                                }
+                                null -> CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
                                 true -> Icon(
                                     Icons.Default.CheckCircle,
                                     contentDescription = null,
-                                    tint = Color.Green.copy(alpha = 0.6f),
+                                    tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.55f),
                                     modifier = Modifier.size(16.dp)
                                 )
                                 false -> Icon(
                                     Icons.Default.Warning,
                                     contentDescription = null,
-                                    tint = Color.Red.copy(alpha = 0.6f),
+                                    tint = MaterialTheme.colorScheme.error.copy(alpha = 0.70f),
                                     modifier = Modifier.size(16.dp)
                                 )
                             }
@@ -474,13 +480,13 @@ fun HookSettingsScreen(repo: HookSettingsRepository) {
                                 true -> Icon(
                                     Icons.Default.CheckCircle,
                                     contentDescription = null,
-                                    tint = Color.Green.copy(alpha = 0.6f),
+                                    tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.55f),
                                     modifier = Modifier.size(16.dp)
                                 )
                                 false -> Icon(
                                     Icons.Default.Warning,
                                     contentDescription = null,
-                                    tint = Color.Red.copy(alpha = 0.6f),
+                                    tint = MaterialTheme.colorScheme.error.copy(alpha = 0.70f),
                                     modifier = Modifier.size(16.dp)
                                 )
                             }
@@ -490,7 +496,7 @@ fun HookSettingsScreen(repo: HookSettingsRepository) {
                 
                 Spacer(Modifier.height(2.dp))
                 
-                // Root权限
+                // Root权限（仅展示图标/进度，去除文字）
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -509,22 +515,19 @@ fun HookSettingsScreen(repo: HookSettingsRepository) {
                     ) {
                         when (rootStatus?.available) {
                             null -> CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
-                            true -> Icon(Icons.Default.CheckCircle, contentDescription = null, tint = Color.Green, modifier = Modifier.size(16.dp))
-                            false -> Icon(Icons.Default.Warning, contentDescription = null, tint = Color.Red, modifier = Modifier.size(16.dp))
+                            true -> Icon(
+                                Icons.Default.CheckCircle,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.55f),
+                                modifier = Modifier.size(16.dp)
+                            )
+                            false -> Icon(
+                                Icons.Default.Warning,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.error.copy(alpha = 0.70f),
+                                modifier = Modifier.size(16.dp)
+                            )
                         }
-                        Spacer(Modifier.width(4.dp))
-                        Text(
-                            when (rootStatus?.available) {
-                                null -> "检测中..."
-                                true -> "已获取"
-                                false -> "未获取"
-                            },
-                            color = when (rootStatus?.available) {
-                                null -> MaterialTheme.colorScheme.onSurfaceVariant
-                                true -> Color.Green
-                                false -> Color.Red
-                            }
-                        )
                     }
                 }
                 
@@ -546,7 +549,7 @@ fun HookSettingsScreen(repo: HookSettingsRepository) {
                     Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
                         when (magiskAvailable) {
                             null -> { CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp); Spacer(Modifier.width(4.dp)); Text("检测中...", color = MaterialTheme.colorScheme.onSurfaceVariant) }
-                            true -> { Icon(Icons.Default.CheckCircle, contentDescription = null, tint = Color.Green.copy(alpha = 0.6f), modifier = Modifier.size(16.dp)); Spacer(Modifier.width(4.dp)); Text("可用") }
+                            true -> { Icon(Icons.Default.CheckCircle, contentDescription = null, tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.55f), modifier = Modifier.size(16.dp)); Spacer(Modifier.width(4.dp)); Text("可用") }
                             false -> { Icon(Icons.Default.Warning, contentDescription = null, tint = Color.Red.copy(alpha = 0.6f), modifier = Modifier.size(16.dp)); Spacer(Modifier.width(4.dp)); Text("不可用") }
                         }
                     }
@@ -562,7 +565,7 @@ fun HookSettingsScreen(repo: HookSettingsRepository) {
                     Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
                         when (magiskModuleInstalled) {
                             null -> { CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp); Spacer(Modifier.width(4.dp)); Text("检测中...", color = MaterialTheme.colorScheme.onSurfaceVariant) }
-                            true -> { Icon(Icons.Default.CheckCircle, contentDescription = null, tint = Color.Green.copy(alpha = 0.6f), modifier = Modifier.size(16.dp)); Spacer(Modifier.width(4.dp)); Text("已安装") }
+                            true -> { Icon(Icons.Default.CheckCircle, contentDescription = null, tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.55f), modifier = Modifier.size(16.dp)); Spacer(Modifier.width(4.dp)); Text("已安装") }
                             false -> { Icon(Icons.Default.Warning, contentDescription = null, tint = Color.Red.copy(alpha = 0.6f), modifier = Modifier.size(16.dp)); Spacer(Modifier.width(4.dp)); Text("未安装") }
                         }
                     }
@@ -596,7 +599,7 @@ fun HookSettingsScreen(repo: HookSettingsRepository) {
                                 isInstallingModule = true; moduleManagementMessage = "正在创建动态模块..."
                                 try {
                                     val result = magiskManager.createLightweightModule()
-                                    if (result.success) { magiskModuleInstalled = magiskManager.isModuleInstalled(); moduleManagementMessage = "✅ ${result.message}" } else { moduleManagementMessage = "❌ ${result.message}" }
+                                    if (result.success) { magiskModuleInstalled = magiskManager.isModuleInstalled(); moduleManagementMessage = "SUCCESS:${result.message}" } else { moduleManagementMessage = "ERROR:${result.message}" }
                                 } finally { isInstallingModule = false }
                             }
                         },
@@ -612,7 +615,7 @@ fun HookSettingsScreen(repo: HookSettingsRepository) {
                                 isInstallingModule = true; moduleManagementMessage = "正在卸载模块..."
                                 try {
                                     val result = magiskManager.uninstallModule()
-                                    if (result.success) { magiskModuleInstalled = magiskManager.isModuleInstalled(); moduleManagementMessage = "✅ ${result.message}" } else { moduleManagementMessage = "❌ ${result.message}" }
+                                    if (result.success) { magiskModuleInstalled = magiskManager.isModuleInstalled(); moduleManagementMessage = "SUCCESS:${result.message}" } else { moduleManagementMessage = "ERROR:${result.message}" }
                                 } finally { isInstallingModule = false }
                             }
                         },
@@ -625,12 +628,24 @@ fun HookSettingsScreen(repo: HookSettingsRepository) {
                 }
                 Spacer(Modifier.height(8.dp))
                 OutlinedButton(
-                    onClick = { scope.launch { loadStatus(force = true); moduleManagementMessage = "✅ 状态已刷新" } },
+                    onClick = { scope.launch { loadStatus(force = true); moduleManagementMessage = "INFO:状态已刷新" } },
                     modifier = Modifier.fillMaxWidth()
                 ) { Text("刷新") }
                 if (moduleManagementMessage.isNotEmpty()) {
                     Spacer(Modifier.height(6.dp))
-                    Text("状态: $moduleManagementMessage", color = ResultFormatter.getResultColor(moduleManagementMessage), style = MaterialTheme.typography.bodySmall)
+                    val (stype, body) = remember(moduleManagementMessage) {
+                        val parts = moduleManagementMessage.split(":", limit = 2)
+                        if (parts.size == 2) {
+                            val t = when(parts[0]) {
+                                "SUCCESS" -> StatusType.SUCCESS
+                                "ERROR" -> StatusType.ERROR
+                                "INFO" -> StatusType.INFO
+                                else -> StatusType.INFO
+                            }
+                            t to parts[1]
+                        } else StatusType.INFO to moduleManagementMessage
+                    }
+                    StatusLine(type = stype, text = body)
                 }
             }
         }
@@ -764,25 +779,32 @@ fun HookSettingsScreen(repo: HookSettingsRepository) {
                         Row {
                             Button(onClick = {
                                 scope.launch {
-                                    repo.update { it.copy(
-                                        hookEnabled = hookEnabled,
-                                        displayCapacity = displayCapacity.text.trim().ifEmpty { "0" }.toIntOrNull() ?: 0,
-                                        useSystemProp = useSystemProp,
-                                        customCapacity = customCapacity.text.trim().ifEmpty { "0" }.toIntOrNull() ?: 0,
-                                        hookTextView = hookTextView,
-                                        hookSharedPrefs = hookSharedPrefs,
-                                        hookJsonMethods = hookJsonMethods,
-                                        launcherIconEnabled = launcherIconEnabled
-                                    ) }
-                                    // 应用桌面图标显隐
-                                    val pm = context.packageManager
-                                    val comp = android.content.ComponentName("com.override.battcaplsp", "com.override.battcaplsp.Launcher")
-                                    pm.setComponentEnabledSetting(
-                                        comp,
-                                        if (launcherIconEnabled) android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_ENABLED else android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
-                                        android.content.pm.PackageManager.DONT_KILL_APP
-                                    )
-                                    msg = "✅ 设置保存成功"
+                                    try {
+                                        val displayCap = displayCapacity.text.trim().ifEmpty { "0" }.toIntOrNull() ?: 0
+                                        if (displayCap < 0 || displayCap > 200000) {
+                                            msg = "ERROR:显示容量超出范围"; OpEvents.error("Hook:显示容量非法 $displayCap"); return@launch
+                                        }
+                                        repo.update { it.copy(
+                                            hookEnabled = hookEnabled,
+                                            displayCapacity = displayCap,
+                                            useSystemProp = useSystemProp,
+                                            customCapacity = customCapacity.text.trim().ifEmpty { "0" }.toIntOrNull() ?: 0,
+                                            hookTextView = hookTextView,
+                                            hookSharedPrefs = hookSharedPrefs,
+                                            hookJsonMethods = hookJsonMethods,
+                                            launcherIconEnabled = launcherIconEnabled
+                                        ) }
+                                        val pm = context.packageManager
+                                        val comp = android.content.ComponentName("com.override.battcaplsp", "com.override.battcaplsp.Launcher")
+                                        pm.setComponentEnabledSetting(
+                                            comp,
+                                            if (launcherIconEnabled) android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_ENABLED else android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
+                                            android.content.pm.PackageManager.DONT_KILL_APP
+                                        )
+                                        msg = "SUCCESS:设置保存成功"; OpEvents.success("Hook:设置保存")
+                                    } catch (t: Throwable) {
+                                        msg = "ERROR:保存异常 ${t.message}"; OpEvents.error("Hook:保存异常 ${t.message}")
+                                    }
                                 }
                             }) { Text("保存设置") }
                             
@@ -790,17 +812,19 @@ fun HookSettingsScreen(repo: HookSettingsRepository) {
                             
                             Button(onClick = {
                                 scope.launch {
-                                    // 重置为默认值
-                                    hookEnabled = true
-                                    displayCapacity = TextFieldValue("")
-                                    useSystemProp = true
-                                    customCapacity = TextFieldValue("")
-                                    hookTextView = true
-                                    hookSharedPrefs = true
-                                    hookJsonMethods = true
-                                    
-                                    repo.update { HookSettingsState() }
-                                    msg = "✅ 已重置为默认设置"
+                                    try {
+                                        hookEnabled = true
+                                        displayCapacity = TextFieldValue("")
+                                        useSystemProp = true
+                                        customCapacity = TextFieldValue("")
+                                        hookTextView = true
+                                        hookSharedPrefs = true
+                                        hookJsonMethods = true
+                                        repo.update { HookSettingsState() }
+                                        msg = "INFO:已重置为默认设置"; OpEvents.info("Hook:重置默认")
+                                    } catch (t: Throwable) {
+                                        msg = "ERROR:重置异常 ${t.message}"; OpEvents.error("Hook:重置异常 ${t.message}")
+                                    }
                                 }
                             }) { Text("重置默认") }
                         }
@@ -873,17 +897,34 @@ fun HookSettingsScreen(repo: HookSettingsRepository) {
         setMsg: (String) -> Unit
     ) {
         isInstallingModule = true
-        setMsg("🔍 正在测试 $moduleName...")
+    setMsg("INFO:正在测试 $moduleName...")
         val test = safeInstaller.quickTestModule(moduleName, localPath, emptyMap())
         if (!test.passed) {
-            setMsg("❌ 测试失败: ${test.message}")
+            setMsg("ERROR:测试失败: ${test.message}")
             try { RootShell.exec("rmmod ${moduleName}") } catch (_: Throwable) {}
             isInstallingModule = false
             return
         }
-        setMsg("📦 测试通过，正在安装...")
-        val ok = magiskManager.installKernelModule(moduleName, localPath, version)
-        setMsg(if (ok) "✅ $moduleName 安装成功 (已测试)" else "❌ $moduleName 安装失败")
+    setMsg("INFO:测试通过，正在安装...")
+        // 针对 chg_param_override 支持安装后立即试加载 (autoLoad)，其它模块仍只复制
+        val autoLoad = moduleName == "chg_param_override"
+        val detailed = magiskManager.installKernelModuleDetailed(
+            moduleName = moduleName,
+            koFilePath = localPath,
+            version = version,
+            autoLoad = autoLoad,
+            loadParams = if (autoLoad) "verbose=1" else ""
+        )
+        if (detailed.success) {
+            val loadPart = if (autoLoad) {
+                if (detailed.autoLoaded) "已尝试加载 (code=0)" else "已复制(加载失败, 可稍后重试)"
+            } else "已复制"
+            val errTail = if (detailed.errorMessages.isNotEmpty()) " | warn:${detailed.errorMessages.first()}" else ""
+            setMsg("SUCCESS:$moduleName 安装成功 ($loadPart)$errTail")
+        } else {
+            val reason = detailed.errorMessages.firstOrNull()?.take(120) ?: "未知原因"
+            setMsg("ERROR:$moduleName 安装失败: $reason")
+        }
         try { RootShell.exec("rmmod ${moduleName}") } catch (_: Throwable) {}
         isInstallingModule = false
     }
@@ -909,30 +950,24 @@ fun HookSettingsScreen(repo: HookSettingsRepository) {
                                 .clickable {
                                     showModuleDownloadDialog = false
                                     scope.launch {
-                                        val localModule = downloader.getLocalModule(moduleInfo.name, moduleInfo.version, moduleInfo.kernelVersion)
-                                        if (localModule != null) {
+                                        // 改动: 强制忽略本地缓存，每次都重新下载并覆盖 (用户需求)
+                                        downloadingModule = moduleInfo.name
+                                        moduleDownloadProgress = 0
+                                        moduleManagementMessage = "正在重新下载 ${moduleInfo.name} (忽略本地缓存)..."
+
+                                        val result = downloader.downloadModule(moduleInfo) { progress ->
+                                            moduleDownloadProgress = progress
+                                        }
+
+                                        downloadingModule = null
+
+                                        if (result.success && result.localPath != null) {
+                                            // 下载完成后继续测试 + 安装（保持原行为）
                                             scope.launch {
-                                                implicitTestAndInstall(moduleInfo.name, localModule.absolutePath, moduleInfo.version) { moduleManagementMessage = it }
+                                                implicitTestAndInstall(moduleInfo.name, result.localPath, moduleInfo.version) { moduleManagementMessage = it }
                                             }
                                         } else {
-                                            // 需要下载
-                                            downloadingModule = moduleInfo.name
-                                            moduleDownloadProgress = 0
-                                            moduleManagementMessage = "正在下载 ${moduleInfo.name}..."
-                                            
-                                            val result = downloader.downloadModule(moduleInfo) { progress ->
-                                                moduleDownloadProgress = progress
-                                            }
-                                            
-                                            downloadingModule = null
-                                            
-                                            if (result.success && result.localPath != null) {
-                                                scope.launch {
-                                                    implicitTestAndInstall(moduleInfo.name, result.localPath, moduleInfo.version) { moduleManagementMessage = it }
-                                                }
-                                            } else {
-                                                moduleManagementMessage = "❌ ${result.message}"
-                                            }
+                                            moduleManagementMessage = "ERROR:${result.message}"
                                         }
                                     }
                                 },
@@ -1026,7 +1061,7 @@ fun HookSettingsScreen(repo: HookSettingsRepository) {
                         )
                     }
                     
-                    if (downloadingApk) {
+                    if (apkPhase == "downloading") {
                         Spacer(Modifier.height(8.dp))
                         Row(
                             verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
@@ -1036,68 +1071,146 @@ fun HookSettingsScreen(repo: HookSettingsRepository) {
                                 strokeWidth = 2.dp
                             )
                             Spacer(Modifier.width(8.dp))
-                            Text(
-                                "正在下载... ${apkDownloadProgress}%",
-                                style = MaterialTheme.typography.bodySmall
-                            )
+                            Text("正在下载... ${apkDownloadProgress}%", style = MaterialTheme.typography.bodySmall)
                         }
+                    } else if (apkPhase == "ready") {
+                        Spacer(Modifier.height(8.dp))
+                        StatusLine(StatusType.SUCCESS, "下载完成，准备安装")
+                    } else if (apkPhase == "installing") {
+                        Spacer(Modifier.height(8.dp))
+                        Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                            Spacer(Modifier.width(8.dp))
+                            Text("正在启动安装...", style = MaterialTheme.typography.bodySmall)
+                        }
+                    } else if (apkPhase == "error") {
+                        Spacer(Modifier.height(8.dp))
+                        StatusLine(StatusType.ERROR, "更新失败，请重试")
                     }
                 }
             },
             confirmButton = {
                 Button(
                     onClick = {
-                        if (!downloadingApk) {
-                            downloadingApk = true
-                            apkDownloadProgress = 0
-                            scope.launch {
-                                try {
-                                    val downloadResult = apkDownloadManager.downloadApk(
-                                        releaseInfo.downloadUrl,
-                                        releaseInfo.versionName
-                                    )
-                                    
-                                    if (downloadResult.success && downloadResult.filePath != null) {
-                                        // 下载成功，尝试安装
-                                        val installResult = apkDownloadManager.installApk(downloadResult.filePath)
-                                        if (installResult.success) {
-                                            showUpdateDialog = false
-                                        } else {
-                                            // 安装失败，显示错误
-                                            android.widget.Toast.makeText(
-                                                context,
-                                                "安装失败: ${installResult.error}",
-                                                android.widget.Toast.LENGTH_LONG
-                                            ).show()
+                        scope.launch {
+                            when (apkPhase) {
+                                "idle", "error" -> {
+                                    // 启动下载
+                                    downloadingApk = true
+                                    apkPhase = "downloading"
+                                    apkDownloadProgress = 0
+                                    val result = apkDownloadManager.downloadApk(releaseInfo.downloadUrl, releaseInfo.versionName)
+                                    if (result.success && result.downloadId != null && result.filePath != null) {
+                                        apkDownloadId = result.downloadId
+                                        apkLocalPath = result.filePath
+                                        // 轮询进度
+                                        while (true) {
+                                            kotlinx.coroutines.delay(600)
+                                            val pg = apkDownloadId?.let { apkDownloadManager.queryProgress(it) }
+                                            if (pg != null) {
+                                                apkDownloadProgress = pg.percent
+                                                if (pg.completed) {
+                                                    // localUri 可能是 file:// 开头
+                                                    val local = pg.localUri?.removePrefix("file://") ?: apkLocalPath
+                                                    apkLocalPath = local
+                                                    apkPhase = "ready"
+                                                    downloadingApk = false
+                                                    break
+                                                }
+                                                if (pg.failed) {
+                                                    apkPhase = "error"
+                                                    downloadingApk = false
+                                                    android.widget.Toast.makeText(context, "下载失败", android.widget.Toast.LENGTH_LONG).show()
+                                                    break
+                                                }
+                                            }
                                         }
                                     } else {
-                                        // 下载失败
-                                        android.widget.Toast.makeText(
-                                            context,
-                                            "下载失败: ${downloadResult.error}",
-                                            android.widget.Toast.LENGTH_LONG
-                                        ).show()
+                                        apkPhase = "error"
+                                        downloadingApk = false
+                                        android.widget.Toast.makeText(context, "下载启动失败: ${result.error}", android.widget.Toast.LENGTH_LONG).show()
                                     }
-                                } catch (e: Exception) {
-                                    android.widget.Toast.makeText(
-                                        context,
-                                        "更新失败: ${e.message}",
-                                        android.widget.Toast.LENGTH_LONG
-                                    ).show()
-                                } finally {
-                                    downloadingApk = false
                                 }
+                                "ready" -> {
+                                    // 安装
+                                    apkPhase = "installing"
+                                    val p = apkLocalPath
+                                    if (p != null) {
+                                        val res = apkDownloadManager.installApk(p)
+                                        if (res.success) {
+                                            apkPhase = "done"
+                                            showUpdateDialog = false
+                                        } else {
+                                            apkPhase = "error"
+                                            val err = res.error ?: "未知错误"
+                                            android.widget.Toast.makeText(context, "安装失败：$err", android.widget.Toast.LENGTH_LONG).show()
+                                        }
+                                    } else {
+                                        apkPhase = "error"
+                                        android.widget.Toast.makeText(context, "文件路径缺失", android.widget.Toast.LENGTH_LONG).show()
+                                    }
+                                }
+                                "downloading", "installing" -> { /* ignore */ }
+                                "done" -> { showUpdateDialog = false }
                             }
                         }
                     },
-                    enabled = !downloadingApk
+                    enabled = apkPhase !in setOf("downloading", "installing")
                 ) {
-                    Text(if (downloadingApk) "下载中..." else "立即更新")
+                    val label = when (apkPhase) {
+                        "idle", "error" -> "下载更新"
+                        "downloading" -> "下载中..."
+                        "ready" -> "安装更新"
+                        "installing" -> "安装中..."
+                        "done" -> "已完成"
+                        else -> "下载更新"
+                    }
+                    Text(label)
                 }
             },
             dismissButton = {
                 TextButton(onClick = { showUpdateDialog = false }) {
                     Text("稍后更新")
+                }
+            }
+        )
+    }
+
+    // 日志查看对话框 (增强: 使用终端风格 LogViewer)
+    if (showLogDialog) {
+        AlertDialog(
+            onDismissRequest = { showLogDialog = false },
+            title = { Text("最近日志 (末尾400行)") },
+            text = {
+                Column(Modifier.fillMaxWidth()) {
+                    if (loadingLog) {
+                        Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                            Spacer(Modifier.width(8.dp))
+                            Text("正在加载...")
+                        }
+                        Spacer(Modifier.height(8.dp))
+                    }
+                    com.override.battcaplsp.ui.LogViewer(
+                        title = "日志输出",
+                        logText = (logContent ?: if (loadingLog) "" else "(无日志)"),
+                        onClear = { logContent = "" },
+                        maxHeight = 280,
+                        autoScroll = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                Row {
+                    TextButton(onClick = {
+                        loadingLog = true
+                        scope.launch {
+                            logContent = com.override.battcaplsp.core.LogCollector.getRecentLogs(context, maxLines = 400)
+                            loadingLog = false
+                        }
+                    }) { Text("刷新") }
+                    TextButton(onClick = { showLogDialog = false }) { Text("关闭") }
                 }
             }
         )
