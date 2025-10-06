@@ -21,36 +21,37 @@ class KernelModuleDownloader(private val context: Context) {
         private const val GITHUB_API_BASE = "https://api.github.com/repos/serein-213/batt-design-override-module"
         private const val GITHUB_RELEASES_BASE = "https://github.com/serein-213/batt-design-override-module/releases/download"
         
-        // 支持的内核版本到 Android 版本的映射
+        // 支持的内核版本到 Android 版本的映射（仅用于显示，可为空）
         private val KERNEL_TO_ANDROID = mapOf(
             "5.4" to "android11",
-            "5.10" to "android12", 
+            "5.10" to "android12",
             "5.15" to "android13",
             "6.1" to "android14",
             "6.6" to "android15"
         )
-        
-        // 模块文件名模板（匹配实际的 .ko 文件）
-        private val MODULE_TEMPLATES = mapOf(
-            "batt_design_override" to "batt_design_override-{android}-{kernel}.ko",
-            "chg_param_override" to "chg_param_override-{android}-{kernel}.ko"
+
+        // 需要匹配的模块名
+        private val MODULE_NAMES = listOf(
+            "batt_design_override",
+            "chg_param_override"
         )
     }
 
     /**
-     * 判断资产名是否匹配指定模块/Android版本/内核主次版本，允许补丁号（例如 5.15 或 5.15.192）
+     * 判断资产名是否匹配指定模块/内核主次版本，允许：
+     * - 带或不带 android 段（如 android13- 可选）
+     * - 补丁号（例如 5.15 或 5.15.192）
      */
     private fun matchesAssetName(
         assetName: String,
         moduleName: String,
-        androidVersion: String,
         supportedKernelMajorMinor: String
     ): Boolean {
         val pattern = Regex(
             pattern = "^" +
                 Regex.escape(moduleName) +
-                "-" + Regex.escape(androidVersion) +
-                "-" + Regex.escape(supportedKernelMajorMinor) +
+                "-(?:android\\d{2}-)?" +
+                Regex.escape(supportedKernelMajorMinor) +
                 "(\\.\\d+)?" +
                 "\\.ko$"
         )
@@ -200,7 +201,7 @@ class KernelModuleDownloader(private val context: Context) {
         val androidVersion: String
     )
     
-    /** 根据内核版本获取可用的模块列表 */
+    /** 根据内核版本获取可用的模块列表（仅按内核版本匹配，安卓段可选） */
     suspend fun getAvailableModules(kernelVersion: ModuleManager.KernelVersion): List<ModuleInfo> = withContext(Dispatchers.IO) {
         val modules = mutableListOf<ModuleInfo>()
         
@@ -214,21 +215,17 @@ class KernelModuleDownloader(private val context: Context) {
                 return@withContext emptyList()
             }
             
-            val androidVersion = KERNEL_TO_ANDROID[supportedVersion] ?: return@withContext emptyList()
-            
-            // 遍历模块模板，查找匹配的 assets（现在匹配 .ko 文件）
-            MODULE_TEMPLATES.forEach { (moduleName, template) ->
-                val expectedPrefix = template
-                    .replace("{android}", androidVersion)
-                    .replace("{kernel}", supportedVersion)
-                android.util.Log.d("KernelModuleDownloader", "Looking for file like: $expectedPrefix (+patch)")
-                
-                // 在 release assets 中查找匹配的文件（允许补丁版本号）
+            val androidVersion = KERNEL_TO_ANDROID[supportedVersion] // 仅用于信息展示
+
+            // 遍历已知模块名，查找匹配的 assets（允许补丁版本号，android 段可选）
+            MODULE_NAMES.forEach { moduleName ->
+                android.util.Log.d("KernelModuleDownloader", "Looking for file of $moduleName with kernel $supportedVersion (android segment optional)")
+
                 val matchingAsset = release.assets.find { asset ->
                     android.util.Log.d("KernelModuleDownloader", "Checking asset: ${asset.name}")
-                    matchesAssetName(asset.name, moduleName, androidVersion, supportedVersion)
+                    matchesAssetName(asset.name, moduleName, supportedVersion)
                 }
-                
+
                 if (matchingAsset != null) {
                     android.util.Log.d("KernelModuleDownloader", "Found matching asset: ${matchingAsset.name}")
                     val actualKernel = extractKernelFromAssetName(matchingAsset.name) ?: supportedVersion
@@ -240,11 +237,11 @@ class KernelModuleDownloader(private val context: Context) {
                             sha256 = matchingAsset.sha256,
                             size = matchingAsset.size,
                             kernelVersion = actualKernel,
-                            androidVersion = androidVersion
+                            androidVersion = androidVersion ?: ""
                         )
                     )
                 } else {
-                    android.util.Log.w("KernelModuleDownloader", "No matching asset found for: $expectedPrefix (allow patch)")
+                    android.util.Log.w("KernelModuleDownloader", "No matching asset found for: $moduleName kernel $supportedVersion (android segment optional)")
                 }
             }
             

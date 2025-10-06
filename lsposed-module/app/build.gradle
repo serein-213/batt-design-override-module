@@ -11,8 +11,8 @@ android {
         applicationId 'com.override.battcaplsp'
         minSdk 27
         targetSdk 34
-        versionCode 200
-        versionName '2.0'
+        versionCode 202
+        versionName '2.0.2'
     }
 
     signingConfigs {
@@ -44,6 +44,7 @@ android {
     }
     kotlinOptions {
         jvmTarget = '17'
+        freeCompilerArgs += ['-Xjvm-default=all']
     }
 
     buildFeatures {

@@ -105,7 +105,8 @@ class MainActivity: ComponentActivity() {
     @OptIn(ExperimentalMaterial3Api::class)
     @Composable private fun AppScaffold() {
         var tab by remember { mutableStateOf(0) }
-        val tabs = listOf("电池", "充电", "设置")
+    // 移除“安全安装”独立 Tab，整合到现有界面逻辑
+    val tabs = listOf("电池", "充电", "设置")
         Scaffold(topBar = {
             // 仅保留一层标题栏：移除重复标题，直接用 TabRow 作为顶栏内容
             TabRow(selectedTabIndex = tab) {
@@ -126,6 +127,7 @@ class MainActivity: ComponentActivity() {
     }
 
     @Composable private fun BatteryScreen() {
+        val context = LocalContext.current
         val scope = rememberCoroutineScope()
         val snackbarHostState = remember { SnackbarHostState() }
         val uiState by battRepo.flow.collectAsState(initial = com.override.battcaplsp.core.UiState())
@@ -243,6 +245,7 @@ class MainActivity: ComponentActivity() {
                             }
                             // 4. 总是同步到 params.conf (系统层持久化)，即使运行时写失败也保持持久化一致
                             com.override.battcaplsp.core.ConfigSync.syncBatt(
+                                context,
                                 battName.text.trim(),
                                 uahVal,
                                 uwhVal,
@@ -258,6 +261,7 @@ class MainActivity: ComponentActivity() {
                 }
                 Spacer(Modifier.height(8.dp))
                 Row {
+                    // 直接保留“传统加载模块”，去掉单独的“安全加载模块”按钮逻辑
                     Button({
                         scope.launch {
                             val mAhStr2 = designUah.text.trim(); val whStr2 = designUwh.text.trim()
@@ -290,7 +294,8 @@ class MainActivity: ComponentActivity() {
                         scope.launch {
                             val res = RootShell.exec("dmesg | grep batt_design_override")
                             opResult = if (res.code == 0) {
-                                val logLines = res.out.split('\n').takeLast(200)
+                                // 精简显示长度：从 200 行缩短到 80 行，保留最近关键信息
+                                val logLines = res.out.split('\n').takeLast(80)
                                 if (logLines.any { it.isNotBlank() }) {
                                     "✅ 内核日志读取成功:\n" + logLines.joinToString("\n")
                                 } else {
